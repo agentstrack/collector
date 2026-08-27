@@ -1,0 +1,114 @@
+name: 🤖 Agent support request
+description: Ask for (or offer) an adapter for a coding agent the collector does not yet support.
+title: "agent: support <agent name>"
+labels: ["adapter", "enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The collector supports **Claude Code** and **Codex** today; Gemini CLI, OpenCode, Cursor,
+        Cline and Copilot CLI are planned.
+
+        One hard constraint shapes every adapter: **we tail log files the agent already writes.**
+        The collector never installs hooks and never modifies an agent's configuration. So the
+        single most useful thing in this issue is *where the agent writes its session log and what
+        a line of it looks like*.
+
+  - type: input
+    id: agent-name
+    attributes:
+      label: Agent name
+      placeholder: "Gemini CLI"
+    validations:
+      required: true
+
+  - type: input
+    id: agent-url
+    attributes:
+      label: Homepage or repository
+      placeholder: "https://github.com/google-gemini/gemini-cli"
+    validations:
+      required: true
+
+  - type: input
+    id: agent-version
+    attributes:
+      label: Version you are using
+      placeholder: "0.4.2"
+    validations:
+      required: true
+
+  - type: textarea
+    id: log-location
+    attributes:
+      label: Where does it write session logs?
+      description: >
+        Absolute path pattern, with your username replaced by a placeholder. If you are not sure,
+        `ls -lt ~/.<agent>` and `lsof -p <pid> | grep -i log` while it runs will usually find it.
+      placeholder: |
+        ~/.gemini/tmp/<project-hash>/logs.json
+        one JSON object per line, appended as the session runs
+    validations:
+      required: true
+
+  - type: dropdown
+    id: log-format
+    attributes:
+      label: Log format
+      options:
+        - JSON Lines (one JSON object per line)
+        - Single JSON file rewritten as the session runs
+        - SQLite database
+        - Plain text
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: token-usage
+    attributes:
+      label: Does the log contain token usage?
+      description: >
+        Without token counts an adapter cannot produce cost or usage analytics — it can still
+        produce a session timeline, but say so here so expectations are set.
+      options:
+        - "Yes — per request/response"
+        - "Yes — cumulative session totals only"
+        - "No token information in the log"
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Redacted sample log lines
+      description: >
+        20–60 lines is plenty. **Scrub it first**: replace prompt text, absolute paths, ids and repo
+        names with placeholders, and delete anything credential-shaped. This becomes the test
+        fixture if the adapter gets written, so its quality directly determines whether it happens.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Platforms you can test on
+      multiple: true
+      options:
+        - macOS
+        - Linux
+        - Windows (WSL)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to write the adapter (see CONTRIBUTING.md — detect / health / normalize, plus a fixture).
+        - label: I can test a pre-release build against this agent.
+        - label: My sample above is redacted — no real credentials, prompts, or private paths.
+          required: true

@@ -1,0 +1,42 @@
+{
+  "name": "@agentstrack/collector",
+  "version": "0.1.0",
+  "description": "Privacy-first telemetry collector for AI coding agents — Claude Code, Codex, and more. Local-first, open source.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": { "agentstrack": "./dist/cli.js" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md", "LICENSE", "CHANGELOG.md"],
+  "engines": { "node": ">=24" },
+  "keywords": [
+    "claude-code", "codex", "ai-coding", "telemetry", "analytics", "developer-tools",
+    "observability", "token-usage", "ai-cost-tracking", "openai", "anthropic"
+  ],
+  "repository": { "type": "git", "url": "git+https://github.com/agentstrack/collector.git" },
+  "homepage": "https://agentstrack.ai",
+  "bugs": { "url": "https://github.com/agentstrack/collector/issues" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "chokidar": "^4.0.3",
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1",
+    "yaml": "^2.6.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

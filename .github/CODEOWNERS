@@ -1,0 +1,30 @@
+# Review ownership. GitHub requests these reviewers automatically; the last
+# matching pattern wins, so the specific rules below override the catch-all.
+#
+# See GOVERNANCE.md for who these people are and how the list changes.
+
+# Everything, unless a rule below is more specific.
+*                           @agentstrack/maintainers
+
+# The wire format is shared with the server by contract, not by a workspace
+# link. A change here without the matching change there breaks ingest for every
+# collector in the field.
+/src/schema.ts              @agentstrack/maintainers
+/src/schema.contract.test.ts @agentstrack/maintainers
+/docs/EVENT_SCHEMA.md       @agentstrack/maintainers
+
+# The privacy pipeline and the redaction rules are the whole trust story.
+# Nothing here merges on one pair of eyes that happen to be the author's.
+/src/privacy/              @agentstrack/maintainers
+/SECURITY.md               @agentstrack/maintainers
+
+# Durability: the spool and the tailer are what make "nothing is lost" true.
+/src/queue/                @agentstrack/maintainers
+
+# Anything that can publish to npm or hold a secret.
+/.github/workflows/        @agentstrack/maintainers
+/package.json              @agentstrack/maintainers
+
+# Adapters are the contribution we most want, and the least dangerous to get
+# wrong — a broken adapter degrades one agent, it does not leak anything.
+/src/adapters/             @agentstrack/maintainers

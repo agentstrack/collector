@@ -1,0 +1,78 @@
+name: 💡 Feature request
+description: Suggest a capability or a change to how the collector behaves.
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Requesting support for a **new coding agent**? Use the
+        [🤖 Agent support request](https://github.com/agentstrack/collector/issues/new?template=agent_support.yml)
+        template instead — it asks the specific questions an adapter needs.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you cannot do today? Describe the situation, not the solution.
+      placeholder: |
+        I work across two orgs on one laptop and want each project's events to go to a
+        different AgentsTrack instance. Today there is one api_url for the whole machine.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like to happen
+      placeholder: |
+        A per-project override block in config.yaml, matched on project root prefix the way
+        privacy.excluded_projects already is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including workarounds you are using now — e.g. two AGENTSTRACK_HOME directories.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent adapters
+        - Privacy and redaction
+        - CLI and output
+        - Configuration
+        - Upload, spool, and offline behaviour
+        - Service install (launchd / systemd)
+        - Event schema
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: privacy-impact
+    attributes:
+      label: Does this change what data leaves the machine?
+      description: >
+        Be honest here — a proposal that widens collection is not automatically rejected, but it
+        must be opt-in and it will be discussed on that basis.
+      options:
+        - "No — no new data would be collected or uploaded"
+        - "Yes — it would collect or upload something new"
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open a PR for this.
+        - label: I searched existing issues and discussions for this.
+          required: true
