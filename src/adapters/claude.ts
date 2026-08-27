@@ -1,8 +1,9 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent } from './types.js';
+import type { AccountIdentity, AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent } from './types.js';
 import { num, safeJsonParse, str } from './types.js';
+import { readClaudeAccount } from './account.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
 
@@ -47,6 +48,19 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // Unreadable project dir is not fatal; the tailer reports per-file errors.
     }
     return { installed: true, version, watchPaths: [PROJECTS_DIR] };
+  }
+
+  /**
+   * The account Claude Code is signed in as right now.
+   *
+   * ~/.claude.json carries a single `oauthAccount` and is rewritten on account
+   * switch, so this is a live reading with no history behind it. The daemon
+   * attaches it only to events written after the collector started — a
+   * transcript that was already on disk cannot be attributed retroactively and
+   * gets no account rather than the wrong one.
+   */
+  account(): AccountIdentity | undefined {
+    return readClaudeAccount(CLAUDE_DIR);
   }
 
   async health(): Promise<HealthStatus> {

@@ -11,10 +11,45 @@ released as a major version, with a migration note in this file.
 ## [Unreleased]
 
 ### Added
+- **OpenCode adapter.** Reads `~/.local/share/opencode/opencode.db` (honouring `$XDG_DATA_HOME`,
+  `$OPENCODE_DATA_DIR` and `$OPENCODE_DB`) and emits `session.started`, `session.ended`, cumulative
+  `usage.reported`, `user.prompted`, `tool.completed` / `tool.failed`, `command.executed`,
+  `file.changed` and `file.read`. OpenCode records the provider's real settled cost, so it is the
+  first agent whose sessions carry `cost_basis: REPORTED` rather than an estimate.
+
+  This is a live database the OpenCode app writes to, so it is opened `readonly` + `fileMustExist`
+  with `PRAGMA query_only` and a `busy_timeout`, one short query at a time. The collector never
+  writes to, migrates or locks a user's data.
+- **`AgentAdapter.poll()`**, an optional pull-based source for database-backed agents. `normalize()`
+  is line-oriented and a SQLite file has no lines; rather than pretend otherwise, the daemon drives
+  `poll()` on the same scan cycle, under the same `tracking.agents` gating, the same
+  `excluded_projects` filter and the same privacy pipeline. Resumption uses the spool's meta store —
+  the tailer's `(path, inode, offset)` checkpoint means nothing to a database.
+- **Per-account attribution.** `session.started` and `user.prompted` now carry an optional `account`
+  object: a stable opaque `key` (Claude Code's `oauthAccount.accountUuid`; OpenCode's
+  `<serviceID>:<accountId>`), plus `label`, `org` and `provider`. Sessions from a personal login and
+  a work login no longer merge into one identity and one bill.
+
+  `label` and `org` are PII and are stripped by the privacy pipeline in `metadata` mode; `key` and
+  `provider` always travel, so sessions still split correctly there. Credentials are never read:
+  OpenCode's `account.json` holds a live API key beside the account id and only `id`/`serviceID` are
+  touched, while `auth.json` is never opened.
+
+  Events that predate the collector's start carry **no** account. These files record only who is
+  signed in now, so a historical transcript cannot be attributed without guessing, and a guess that
+  looks like a fact is worse than a blank.
 - `SUPPORT.md`, `ROADMAP.md`, `GOVERNANCE.md`, `CODEOWNERS`, `.editorconfig`, `.gitattributes`,
   `.nvmrc`, Dependabot config and a CodeQL workflow.
 
+### Fixed
+- **`session.started.cwd` is no longer sent as an absolute path** regardless of
+  `privacy.file_paths`. `cwd` *is* the project root, and it leaked the username, the client name and
+  the directory tree even in `metadata` mode — where `repo.project_path` was already being dropped.
+  It now follows the same rule: sent only under `file_paths: absolute`. Affected the Codex adapter
+  since 0.1.0.
+
 ### Changed
+- `tracking.agents` defaults to `[claude_code, codex, opencode]`.
 - **`privacy.prompts: never` now strips the locally derived `derived_title` in `analytics` mode**, so
   it is possible to keep token, tool and cost analytics while sending nothing derived from a prompt.
   Previously the setting was consulted only in `full` mode, which made `never` and

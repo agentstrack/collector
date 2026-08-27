@@ -7,15 +7,17 @@
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 
-`@agentstrack/collector` turns the log files Claude Code and Codex already write on your machine into
-a normalized event stream:
+`@agentstrack/collector` turns the records Claude Code, Codex and OpenCode already keep on your
+machine into a normalized event stream:
 
-- **Tokens and cost** — input, cached input, cache creation, output and reasoning tokens, normalized across both agents.
+- **Tokens and cost** — input, cached input, cache creation, output and reasoning tokens, normalized across every agent. OpenCode's real settled provider cost comes through as `REPORTED`, not an estimate.
+- **Which account paid** — a stable, opaque account key per session, so a personal login and a work one never merge into one bill.
 - **What actually happened** — tool calls, commands, files changed with line counts, and the commits a session produced.
 - **Nothing you didn't agree to** — prompts and code are discarded on your machine, before anything is queued for upload.
 
-It **tails log files**. It does not install hooks, it does not wrap your agent, and it **never writes
-to `~/.claude/settings.json` or `~/.codex/hooks.json`**. Uninstalling is `npm rm -g` plus deleting one
+It **reads what the agent already wrote** — append-only logs for Claude Code and Codex, a read-only
+SQLite query for OpenCode. It does not install hooks, it does not wrap your agent, and it **never
+writes to `~/.claude/settings.json`, `~/.codex/hooks.json` or OpenCode's database**. Uninstalling is `npm rm -g` plus deleting one
 directory; nothing about your agent setup changes.
 
 **You do not have to take that on faith.** It is Apache-2.0 and this is the whole of it — the part
@@ -163,14 +165,16 @@ agentstrack doctor --json               # structured diagnostics, safe to paste 
 ```text
   ~/.claude/projects/<slug>/<session-uuid>.jsonl
   ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
-                    │
-                    │  append-only files the agents already write
-                    ▼
-       ┌────────────────────────┐
-       │        tailer          │  rescans every 5s, reads only what is new
-       │ (read-only, resumable) │  (path, inode, offset) checkpoints in spool.db
-       └───────────┬────────────┘
-                   ▼
+                    │                          ~/.local/share/opencode/opencode.db
+                    │  append-only files                    │
+                    ▼                                       ▼
+       ┌────────────────────────┐          ┌────────────────────────┐
+       │        tailer          │          │      db poller         │  same 5s cycle
+       │ (read-only, resumable) │          │ (READ-ONLY, no writes) │  time_updated cursors
+       │ (path,inode,offset) cp │          │  in spool.db meta      │  in spool.db meta
+       └───────────┬────────────┘          └───────────┬────────────┘
+                   └───────────────┬───────────────────┘
+                                   ▼
        ┌────────────────────────┐
        │    privacy pipeline    │  mode-based content strip
        │                        │  → 15 built-in secret rules + org rules
@@ -450,6 +454,7 @@ tracking:
   agents:
     - claude_code
     - codex
+    - opencode
 upload:
   batch_size: 100
   interval_seconds: 30
@@ -554,7 +559,9 @@ upload:
 ```
 
 Environment overrides: `AGENTSTRACK_HOME` (all local state), `CLAUDE_CONFIG_DIR` (default
-`~/.claude`), `CODEX_HOME` (default `~/.codex`).
+`~/.claude`), `CODEX_HOME` (default `~/.codex`), `OPENCODE_DATA_DIR` (default
+`$XDG_DATA_HOME/opencode`, falling back to `~/.local/share/opencode`) and `OPENCODE_DB` (the
+database filename or an absolute path — the same override OpenCode itself honours).
 
 ---
 
@@ -564,27 +571,60 @@ Environment overrides: `AGENTSTRACK_HOME` (all local state), `CLAUDE_CONFIG_DIR`
 |---|---|---|
 | **Claude Code** | ✅ Stable | `~/.claude/projects/<slug>/<session-uuid>.jsonl` |
 | **Codex** | ✅ Stable | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
-| Gemini CLI · OpenCode · Cursor · Cline · Copilot CLI | 🗓 Planned | ids reserved in the schema, no adapter yet |
+| **OpenCode** | ✅ Stable | `~/.local/share/opencode/opencode.db` — SQLite, opened **read-only** |
+| Gemini CLI · Cursor · Cline · Copilot CLI | 🗓 Planned | ids reserved in the schema, no adapter yet |
 
-Per-signal honesty — the two adapters do not produce identical data, because the two agents do not
-log identical things:
+Per-signal honesty — the adapters do not produce identical data, because the agents do not record
+identical things:
 
-| Signal | Claude Code | Codex |
-|---|---|---|
-| Session start | ➖ inferred from the first event | ✅ `session.started` from `session_meta` |
-| Prompts / titles | ✅ | ✅ |
-| Per-response token usage | ✅ `model.response` with full cache breakdown | ➖ cumulative `usage.reported` snapshots only |
-| Turn boundaries | ➖ not logged | ✅ `agent.turn.started` / `.ended` |
-| Tool calls | ✅ | ✅ (incl. `custom_tool_call`) |
-| Commands | ✅ from `Bash` tool input | ✅ with exit code and duration |
-| File changes + line counts | ✅ from `Edit`/`Write`/`NotebookEdit` inputs | ✅ parsed from the `apply_patch` body |
-| File reads | ✅ from the `Read` tool | ➖ heuristic, from `cat`/`head`/`tail`/`sed`/`nl`/`bat`/`less` |
-| Agent errors | ➖ not logged | ✅ `error` |
-| Commits | ✅ (from `git log`, not the transcript) | ✅ (same) |
-| Plan / subscription type | ➖ | ✅ `plan_type` |
+| Signal | Claude Code | Codex | OpenCode |
+|---|---|---|---|
+| Session start | ➖ inferred from the first event | ✅ from `session_meta` | ✅ from the `session` row |
+| Session end | ➖ inferred | ➖ inferred | ✅ on archive or compaction |
+| Prompts / titles | ✅ | ✅ | ✅ (OpenCode names its own sessions) |
+| Per-response token usage | ✅ `model.response` with full cache breakdown | ➖ cumulative snapshots only | ➖ cumulative per-session totals only |
+| **Provider-reported cost** | ➖ estimated from a rate card | ➖ estimated | ✅ **`REPORTED` — the real settled charge** |
+| Turn boundaries | ➖ not logged | ✅ `agent.turn.started` / `.ended` | ➖ not emitted |
+| Tool calls | ✅ | ✅ (incl. `custom_tool_call`) | ✅ terminal event with a real duration |
+| Commands | ✅ from `Bash` tool input | ✅ with exit code and duration | ✅ from the `bash` tool's input |
+| File changes + line counts | ✅ from `Edit`/`Write`/`NotebookEdit` inputs | ✅ parsed from the `apply_patch` body | ✅ from `edit`/`write` tool inputs |
+| File reads | ✅ from the `Read` tool | ➖ heuristic, from `cat`/`head`/`tail`/`sed`/`nl`/`bat`/`less` | ✅ from the `read` tool |
+| Agent errors | ➖ not logged | ✅ `error` | ➖ not emitted |
+| Commits | ✅ (from `git log`, not the transcript) | ✅ (same) | ✅ (same) |
+| Plan / subscription type | ➖ | ✅ `plan_type` | ➖ |
+| Account attribution | ✅ from `~/.claude.json` | ➖ no account file | ✅ from `account.json`, per provider |
 
-Both adapters are read-only tailers of files the agent already writes. Adapter formats drift between
-agent releases: an unparseable line is skipped, never fatal to the file.
+Every adapter is read-only. Adapter formats drift between agent releases: an unparseable line is
+skipped, never fatal to the file.
+
+### OpenCode is a live database, not a log
+
+OpenCode keeps sessions, messages and message parts in SQLite — the same file its UI is writing to
+while you work. So this adapter does not tail; it polls, on the same 5-second cycle as the tailer,
+and it takes deliberate care not to be the reason your editor stutters or your history breaks:
+
+- opened `readonly` **and** `fileMustExist`, with `PRAGMA query_only` — a bug here cannot write,
+  migrate or create anything;
+- `PRAGMA busy_timeout` so a concurrent OpenCode write makes us wait briefly instead of failing;
+- one short query at a time, then the handle is closed. No long transactions, ever.
+
+Because `(path, inode, offset)` means nothing to a database, resumption uses three `time_updated`
+cursors in the collector's own spool. A first-ever run reaches back 7 days, the same horizon the
+tailer uses for transcripts.
+
+### Which account did this?
+
+One machine often drives several accounts. Each session carries a stable, opaque `account.key`
+(Claude Code's `accountUuid`; OpenCode's `<serviceID>:<accountId>`) so their costs never merge. The
+readable half — email, organization name — is PII and is stripped in `metadata` mode, where sessions
+still split correctly but the account shows as opaque.
+
+**The credential is never read.** OpenCode's `account.json` stores a live API key next to the account
+id; only `id` and `serviceID` are touched, and `auth.json` is never opened at all.
+
+**Live events only.** These files record who is signed in *now* and are rewritten on account switch,
+so events that predate the collector's start carry **no** account rather than today's — a
+retroactive guess would look exactly like a fact.
 
 Want an agent that is not here? Open an
 [agent support request](https://github.com/agentstrack/collector/issues/new?template=agent_support.yml),

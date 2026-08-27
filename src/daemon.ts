@@ -9,7 +9,8 @@ import { tailFile } from './queue/tailer.js';
 import { ApiClient, backoffMs, type ServerConfig } from './transport/client.js';
 import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
-import type { AgentAdapter, NormalizedEvent } from './adapters/types.js';
+import { OpenCodeAdapter } from './adapters/opencode.js';
+import type { AccountIdentity, AgentAdapter, NormalizedEvent } from './adapters/types.js';
 import { applyPrivacy } from './privacy/pipeline.js';
 import { clampPrivacyMode } from './privacy/mode.js';
 import { isExcluded } from './privacy/paths.js';
@@ -27,8 +28,32 @@ export function log(message: string): void {
 }
 
 export function buildAdapters(config: Config): AgentAdapter[] {
-  const all: AgentAdapter[] = [new ClaudeCodeAdapter(), new CodexAdapter()];
+  const all: AgentAdapter[] = [new ClaudeCodeAdapter(), new CodexAdapter(), new OpenCodeAdapter()];
   return all.filter((a) => config.tracking.agents.includes(a.id));
+}
+
+/**
+ * Event types that carry account attribution.
+ *
+ * Session start pins the whole session to an account; a prompt pins the turn.
+ * Every other event inherits that on the server, so repeating it on each of
+ * them would only add bytes and more places for the identity to leak from.
+ */
+const ACCOUNT_EVENTS = new Set(['session.started', 'user.prompted']);
+
+/**
+ * Whether this event may carry account attribution.
+ *
+ * The honest half is the timestamp. ~/.claude.json and account.json record who
+ * is signed in NOW and keep no history, so an event written before this
+ * collector started — a transcript already on disk at first run, or anything
+ * from a window when the daemon was down — cannot be attributed. It gets NO
+ * account rather than today's account, which would be a plausible-looking lie.
+ */
+export function attributable(eventType: string, occurredAt: string, liveSinceMs: number): boolean {
+  if (!ACCOUNT_EVENTS.has(eventType)) return false;
+  const at = Date.parse(occurredAt);
+  return Number.isFinite(at) && at >= liveSinceMs;
 }
 
 /** Recursively lists .jsonl files under a directory, newest first. */
@@ -70,6 +95,18 @@ export class Collector {
   /** Null when git metadata is switched off — then we never shell out to git. */
   private readonly commitWatcher: GitCommitWatcher | null;
   private serverConfig: ServerConfig | null = null;
+  /**
+   * When this collector started, and therefore the earliest event it can
+   * honestly attribute to an account.
+   *
+   * Account files record only who is signed in NOW. A transcript that was
+   * already on disk when the collector first ran was written by whoever was
+   * signed in at the time, which we cannot know — so backfilled events carry
+   * NO account rather than today's account. Live events, written while we were
+   * watching, do carry one. The same rule covers a restart: the gap while the
+   * collector was down is backfill.
+   */
+  private readonly liveSinceMs = Date.now();
   private uploadFailures = 0;
   /** Shrinks on 413, recovers on success. Never below 1. */
   private batchSize: number;
@@ -169,6 +206,10 @@ export class Collector {
       const detection = await adapter.detect();
       if (!detection.installed) continue;
 
+      // Read once per cycle, not once at boot: the user may have switched
+      // accounts since the last scan.
+      const account = adapter.account?.();
+
       for (const watchPath of detection.watchPaths) {
         for (const file of listTranscripts(watchPath)) {
           const { lines } = await tailFile(file, this.spool);
@@ -184,7 +225,23 @@ export class Collector {
             }
           }
           this.commitWatcher?.observe(normalized);
-          this.enqueue(normalized, collectorId);
+          this.enqueue(normalized, collectorId, account);
+        }
+      }
+
+      // Database-backed agents have no lines to tail; they hand us events on
+      // the same cycle, under the same gating and the same privacy pipeline.
+      if (adapter.poll) {
+        try {
+          const polled = await adapter.poll({
+            collectorId,
+            getMeta: (key) => this.spool.getMeta(key),
+            setMeta: (key, value) => this.spool.setMeta(key, value),
+          });
+          this.commitWatcher?.observe(polled);
+          this.enqueue(polled, collectorId, account);
+        } catch (error) {
+          log(`poll error in ${adapter.id}: ${errorMessage(error)}`);
         }
       }
     }
@@ -201,7 +258,11 @@ export class Collector {
     }
   }
 
-  private enqueue(normalized: NormalizedEvent[], collectorId: string): void {
+  private enqueue(
+    normalized: NormalizedEvent[],
+    collectorId: string,
+    adapterAccount?: AccountIdentity,
+  ): void {
     const envelopes: EventEnvelope[] = [];
 
     for (const item of normalized) {
@@ -210,7 +271,28 @@ export class Collector {
       if (cwd && isExcluded(cwd, this.config.privacy.excluded_projects)) continue;
 
       const repo = cwd && this.config.tracking.git_metadata ? describeRepo(cwd) : item.repo;
-      const payload = repo ? { ...item.event.payload, repo: { ...repo, ...(item.event.payload['repo'] as object ?? {}) } } : item.event.payload;
+      const payload: Record<string, unknown> = repo
+        ? { ...item.event.payload, repo: { ...repo, ...(item.event.payload['repo'] as object ?? {}) } }
+        : { ...item.event.payload };
+
+      // The adapter's per-event identity wins: OpenCode knows which provider
+      // account a given session ran on, which adapter.account() cannot.
+      const account = item.account ?? adapterAccount;
+
+      // Plan type rides with the usage, not with the account block: the server
+      // reads it off the token-bearing event to decide cost basis. Without it a
+      // flat-rate subscriber's spend is labelled "estimated at API list rates",
+      // which reads as a bill they never received.
+      if (
+        account?.planType &&
+        (item.event.event_type === 'usage.reported' || item.event.event_type === 'model.response')
+      ) {
+        payload['plan_type'] = account.planType;
+      }
+
+      if (account && attributable(item.event.event_type, item.event.occurred_at, this.liveSinceMs)) {
+        payload['account'] = account;
+      }
 
       const envelope: EventEnvelope = {
         ...item.event,

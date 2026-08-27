@@ -17,7 +17,7 @@ git clone https://github.com/agentstrack/collector.git
 cd collector
 npm install
 
-npm test            # vitest run  — 95 tests today
+npm test            # vitest run  — 119 tests today
 npm run test:watch  # vitest
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc -> dist/, chmod +x dist/cli.js
@@ -109,8 +109,9 @@ against an unreachable API is fine for this — registration failing just means 
 
 ## Adding a new agent adapter
 
-An adapter's job: find the agent's logs, say whether they are healthy, and turn raw log lines into
-normalized events. It does **not** install hooks and does **not** write to the agent's configuration.
+An adapter's job: find where the agent already records what it did, say whether that source is
+healthy, and turn it into normalized events. It does **not** install hooks and does **not** write to
+the agent's configuration or data.
 
 ### Why there is no `installHooks()`
 
@@ -135,17 +136,26 @@ If an agent cannot be observed by reading files it already writes, open an issue
 export interface AgentAdapter {
   readonly id: string;                    // e.g. 'gemini_cli' — must be in AGENTS
   detect(): Promise<DetectionResult>;     // installed? which directories to watch?
-  health(): Promise<HealthStatus>;        // readable? how many transcripts?
+  health(): Promise<HealthStatus>;        // readable? how many sessions?
   normalize(line: string, ctx: NormalizeContext): NormalizedEvent[];
+  poll?(ctx: PollContext): Promise<NormalizedEvent[]>;   // database-backed agents
+  account?(): AccountIdentity | undefined;               // who is signed in right now
 }
 
 interface DetectionResult { installed: boolean; version?: string; watchPaths: string[]; note?: string }
 interface HealthStatus   { healthy: boolean; filesTracked: number; lastEventAt?: string; error?: string }
 interface NormalizeContext { collectorId: string; sourceFile: string }
+interface PollContext {
+  collectorId: string;
+  getMeta(key: string): string | null;   // the spool's meta store: your resume cursor
+  setMeta(key: string, value: string): void;
+}
+interface AccountIdentity { key: string; label?: string; org?: string; provider?: string }
 interface NormalizedEvent {
   event: Omit<EventEnvelope, 'event_id' | 'collector_id' | 'schema_version'>;
   cwd?: string;          // used for project exclusion and git enrichment
   repo?: RepoContext;
+  account?: AccountIdentity;   // when this event's account is more specific than account()
 }
 ```
 
@@ -154,6 +164,39 @@ unrecognised input — agents change their log formats between releases and one 
 stop the file. Return `[]` instead. It must do no I/O and read no clock; keeping per-file parse
 state in a `Map` keyed by `ctx.sourceFile` is fine and is what the Codex adapter does for the session
 id and model that only appear on the first lines of a rollout.
+
+#### Agents that keep a database instead of a log
+
+Some agents (OpenCode) record everything in SQLite. There are no lines, so `normalize()` returns `[]`
+and the adapter implements **`poll()`** instead; the daemon drives it on the same 5-second scan cycle,
+under the same `tracking.agents` gating, the same `excluded_projects` filter and the same privacy
+pipeline. Three rules:
+
+- **Read-only, always.** `new Database(path, { readonly: true, fileMustExist: true })`, plus
+  `pragma('busy_timeout = …')` and `pragma('query_only = 1')`. This is a file the user's editor is
+  writing to right now; one short query at a time, close the handle, never a long transaction. The
+  collector must not be the reason someone loses their session history.
+- **Cursor in the spool's meta store.** The tailer's `(path, inode, offset)` checkpoint is meaningless
+  here. Use `ctx.getMeta` / `ctx.setMeta` with a `<agent>:cursor:<what>` key on a monotonic column
+  (`time_updated`), and bound each poll with a `LIMIT` so a cold start drains over several cycles.
+- **`detect()` returns an empty `watchPaths`.** There is nothing for the tailer to read, and handing
+  it a `.db` would have it stream binary pages. Put the resolved database path in `note` instead.
+
+#### Account attribution
+
+If the agent records which account it is signed in as, implement `account()`. It is called once per
+scan cycle — these files are rewritten in place on an account switch, so caching the answer at boot
+pins every session to whoever happened to be signed in then. Cache on mtime instead (see
+`src/adapters/account.ts`).
+
+`key` must be stable and non-PII, and it is the only field guaranteed to travel: `label` and `org`
+are stripped in `metadata` mode. **Never read a credential.** OpenCode's `account.json` stores a live
+API key next to the account id; only `id` and `serviceID` are read, and `auth.json` is never opened.
+
+The daemon attaches the account only to events written *after* the collector started. An account file
+has no history, so a transcript already on disk cannot be attributed without guessing — it gets no
+account at all. If your adapter can pin an account more precisely than `account()` can (OpenCode has
+one active account per provider), set `account` on the `NormalizedEvent` and it wins.
 
 ### Steps
 
@@ -164,7 +207,7 @@ id and model that only appear on the first lines of a rollout.
    home-directory environment variable if it has one (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). Do not scan
    the filesystem hunting for logs.
    - `detect()` returns directories in `watchPaths`; the daemon walks them recursively (max depth 5)
-     for `*.jsonl` modified in the last 7 days.
+     for `*.jsonl` modified in the last 7 days. A database-backed adapter returns `[]` here.
    - `health()` runs on every `status` and `doctor` — keep it cheap.
 3. **Register it** in `buildAdapters()` in [`src/daemon.ts`](./src/daemon.ts), and add the id to the
    `tracking.agents` default in [`src/config.ts`](./src/config.ts) only if it should be on by default.
@@ -180,6 +223,8 @@ id and model that only appear on the first lines of a rollout.
    |---|---|
    | `payload.path` | path normalization per `privacy.file_paths` |
    | `payload.repo.project_path` | dropped unless `file_paths: absolute` |
+   | `payload.cwd` | dropped unless `file_paths: absolute` — it *is* the project root |
+   | `payload.account` | `label` and `org` stripped in `metadata`; `key` and `provider` always sent |
    | `payload.command` | secret redaction, and truncation under `shell_arguments: never` |
    | `payload.prompt_text` | deleted in every mode except `full` + `prompts: full` |
    | `payload.derived_title` | deleted in `metadata`, and in `analytics` under `prompts: never` (not in `full` — see ROADMAP); redacted otherwise |
@@ -193,7 +238,9 @@ id and model that only appear on the first lines of a rollout.
    `lines_added` / `lines_removed` at normalize time — see `countEditLines()` in `claude.ts` and
    `parseApplyPatch()` in `codex.ts`.
 7. **Add a fixture and a test.** Fixture at `test/fixtures/<agent>-session.jsonl`, test alongside the
-   other adapter tests in `src/adapters/`.
+   other adapter tests in `src/adapters/`. A database-backed adapter builds a throwaway database in
+   the test instead — see `src/adapters/opencode.test.ts`, which recreates OpenCode's real column
+   list so a schema drift shows up as a failing test rather than as silent zeroes.
 8. **Document it** in the README's supported-agents table, including the per-signal row — say
    honestly what the agent's log does *not* contain.
 

@@ -29,6 +29,9 @@ export const BUILTIN_RULES: RedactionRule[] = [
   { name: 'bearer_header', pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{20,}=*/g, replacement: 'Bearer [REDACTED]' },
   { name: 'basic_auth_url', pattern: /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/g, replacement: '$1[REDACTED]@' },
   { name: 'env_assignment', pattern: /\b([A-Z_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z_]*)\s*=\s*("[^"]*"|'[^']*'|\S+)/g, replacement: '$1=[REDACTED]' },
+  // mysql/psql style inline credentials: -pSECRET, --password=SECRET. Extremely
+  // common in agent shell calls and missed by every key-shaped rule above.
+  { name: 'inline_password_flag', pattern: /(--password[= ]|(?<![\w-])-p)(?!\s)("[^"]*"|'[^']*'|\S+)/g, replacement: '$1[REDACTED]' },
   { name: 'generic_hex_secret', pattern: /\b[a-f0-9]{40,}\b/g, replacement: '[REDACTED:hex]' },
 ];
 

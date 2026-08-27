@@ -204,3 +204,96 @@ describe('prompts policy is honoured independently of the mode', () => {
     expect(event.payload['derived_title']).toBe('Deploy to the prod cluster');
   });
 });
+
+describe('privacy pipeline — account attribution', () => {
+  const withAccount = (): EventEnvelope => ({
+    ...promptEvent(),
+    payload: {
+      prompt_chars: 4,
+      account: {
+        key: '11111111-2222-4333-8444-555555555555',
+        label: 'ada@acme.dev',
+        org: 'Acme Inc',
+        provider: 'anthropic',
+      },
+    },
+  });
+
+  it('metadata mode keeps the opaque key but strips label and org', () => {
+    // Sessions must still SPLIT per account in metadata mode — that is what
+    // `key` is for. An email and an employer are PII and must not travel.
+    const { event } = applyPrivacy(withAccount(), { config: config('metadata') });
+    expect(event.payload['account']).toEqual({
+      key: '11111111-2222-4333-8444-555555555555',
+      provider: 'anthropic',
+    });
+  });
+
+  it('analytics and full modes may name the account', () => {
+    for (const mode of ['analytics', 'full'] as const) {
+      const { event } = applyPrivacy(withAccount(), { config: config(mode) });
+      expect(event.payload['account'], mode).toEqual({
+        key: '11111111-2222-4333-8444-555555555555',
+        provider: 'anthropic',
+        label: 'ada@acme.dev',
+        org: 'Acme Inc',
+      });
+    }
+  });
+
+  it('leaves events without an account alone', () => {
+    const { event } = applyPrivacy(promptEvent(), { config: config('metadata') });
+    expect(event.payload).not.toHaveProperty('account');
+  });
+});
+
+describe('privacy pipeline — session cwd', () => {
+  const startEvent = (): EventEnvelope => ({
+    ...promptEvent(),
+    event_type: 'session.started',
+    payload: { external_session_id: 's1', cwd: '/Users/ada/clients/acme/api' },
+  });
+
+  it('drops the absolute project root unless file_paths is absolute', () => {
+    // cwd is the project root by definition: it names the user and the client.
+    for (const mode of ['metadata', 'analytics', 'full'] as const) {
+      const { event } = applyPrivacy(startEvent(), { config: config(mode) });
+      expect(event.payload, mode).not.toHaveProperty('cwd');
+    }
+  });
+
+  it('keeps it when the developer has opted into absolute paths', () => {
+    const { event } = applyPrivacy(startEvent(), { config: config('full', { file_paths: 'absolute' }) });
+    expect(event.payload['cwd']).toBe('/Users/ada/clients/acme/api');
+  });
+});
+
+describe('metadata mode treats a shell command as content', () => {
+  const cmd = (): EventEnvelope => ({
+    ...promptEvent(),
+    event_type: 'command.executed',
+    payload: { command: 'mysql -h prod-db.client.com -u root -pHunter2 acme -e "select * from wp_users"' },
+  });
+
+  it('ships only the binary name in metadata mode', () => {
+    // Regression: the full command line shipped in every mode, carrying
+    // hostnames, client names and inline passwords, while the mode promised
+    // "counts and timings only".
+    const { event } = applyPrivacy(cmd(), { config: config('metadata') });
+    expect(event.payload['command']).toBe('mysql');
+  });
+
+  it('keeps the command in analytics mode but redacts the inline password', () => {
+    const { event } = applyPrivacy(cmd(), { config: config('analytics') });
+    const out = String(event.payload['command']);
+    expect(out).toContain('mysql');
+    expect(out).not.toContain('Hunter2');
+  });
+
+  it('never lets a credential through in any mode', () => {
+    for (const mode of ['metadata', 'analytics', 'full'] as const) {
+      const { event } = applyPrivacy(cmd(), { config: config(mode, { prompts: 'full' }) });
+      expect(String(event.payload['command']), mode).not.toContain('Hunter2');
+    }
+  });
+});

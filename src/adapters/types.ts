@@ -33,6 +33,51 @@ export interface AgentAdapter {
    * releases, and one unknown line must not stop the file.
    */
   normalize(line: string, ctx: NormalizeContext): NormalizedEvent[];
+  /**
+   * Optional pull-based source, for agents that keep state in a database
+   * instead of an append-only log.
+   *
+   * normalize() is line-oriented and there are no lines in a SQLite file, so
+   * rather than pretend otherwise these adapters produce their events by
+   * polling. The daemon drives poll() on the same scan cycle as the tailer,
+   * with the same `tracking.agents` gating and the same excluded_projects
+   * filter applied to what comes back. Resumption is the adapter's own
+   * problem — the tailer's (path, inode, offset) checkpoint means nothing to a
+   * database, so PollContext hands it the spool's meta store instead.
+   */
+  poll?(ctx: PollContext): Promise<NormalizedEvent[]>;
+  /**
+   * The account this agent is signed in as RIGHT NOW, or undefined when the
+   * agent is logged out or exposes no stable id.
+   *
+   * Called once per scan cycle, not once at boot: these files are rewritten in
+   * place when the user switches accounts.
+   */
+  account?(): AccountIdentity | undefined;
+}
+
+/**
+ * Non-PII account attribution, attached by the daemon to session.started and
+ * user.prompted.
+ *
+ * `key` is opaque and stable and always travels — it is what makes sessions
+ * split per account. `label` and `org` identify a person and their employer
+ * and are stripped by the privacy pipeline below `analytics` mode.
+ */
+export interface AccountIdentity {
+  /** Subscription/plan signal, when the agent exposes one. Drives cost basis. */
+  planType?: string;
+  key: string;
+  label?: string;
+  org?: string;
+  provider?: string;
+}
+
+export interface PollContext {
+  collectorId: string;
+  /** The spool's meta store: a database adapter's resume cursor lives here. */
+  getMeta(key: string): string | null;
+  setMeta(key: string, value: string): void;
 }
 
 export interface NormalizeContext {
@@ -46,6 +91,13 @@ export interface NormalizedEvent {
   event: Omit<EventEnvelope, 'event_id' | 'collector_id' | 'schema_version'>;
   cwd?: string;
   repo?: RepoContext;
+  /**
+   * Account this specific event belongs to, when the adapter can pin it down
+   * more precisely than adapter.account() can — OpenCode holds one active
+   * account per provider, so the answer differs between two sessions on the
+   * same machine. Takes precedence over adapter.account().
+   */
+  account?: AccountIdentity;
 }
 
 export function safeJsonParse(line: string): Record<string, unknown> | null {

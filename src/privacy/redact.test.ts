@@ -83,3 +83,21 @@ describe('commandName', () => {
     expect(commandName('')).toBe('');
   });
 });
+
+describe('inline password flags', () => {
+  it('redacts mysql/psql style credentials', () => {
+    for (const [input, secret] of [
+      ['mysql -u root -pHunter2 db', 'Hunter2'],
+      ['pg_dump --password=s3cr3t mydb', 's3cr3t'],
+      ['tool --password "quoted secret"', 'quoted secret'],
+    ] as const) {
+      expect(redact(input).text, input).not.toContain(secret);
+    }
+  });
+
+  it('does not eat ordinary short flags', () => {
+    // -p is also "port" or "parents"; only a value directly attached counts.
+    expect(redact('mkdir -p build').text).toBe('mkdir -p build');
+    expect(redact('docker run -p 8080:80 img').text).toBe('docker run -p 8080:80 img');
+  });
+});

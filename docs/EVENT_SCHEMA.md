@@ -67,30 +67,34 @@ collector that cannot drain its spool would lose a developer's whole day.
 The schema is the contract; 0.1.0 does not fill all of it. Nothing here is aspirational —
 this column is what the adapters in this repository actually produce.
 
-| Event type | Claude Code | Codex | Source |
-|---|---|---|---|
-| `session.started` | — | ✅ | `session_meta` line |
-| `session.ended` | — | — | not emitted in 0.1.0 |
-| `user.prompted` | ✅ | ✅ | `user` line / `user_message` |
-| `agent.turn.started` | — | ✅ | `turn_context` |
-| `agent.turn.ended` | — | ✅ | `task_complete` |
-| `model.request` | — | — | not emitted in 0.1.0 |
-| `model.response` | ✅ | — | `assistant` line with `usage` |
-| `tool.started` | ✅ | ✅ | `tool_use` / `function_call`, `custom_tool_call` |
-| `tool.completed` | ✅ | ✅ | `tool_result` / `*_output`, `web_search_call` |
-| `tool.failed` | ✅ | ✅ | `is_error` / non-zero exit or `success: false` |
-| `file.read` | ✅ | ✅ | `Read` tool / pager & `cat`-family commands |
-| `file.changed` | ✅ | ✅ | `Edit`/`Write`/`NotebookEdit` input / `apply_patch` body, shell redirects |
-| `command.executed` | ✅ | ✅ | `Bash` tool input / `exec_command_end` |
-| `git.commit` | ✅ | ✅ | `git log` in repos a session touched — not from the transcript |
-| `git.branch_changed` | — | — | not emitted in 0.1.0 |
-| `usage.reported` | — | ✅ | `token_count`, always `cumulative: true` |
-| `error` | — | ✅ | `error` / `stream_error` |
-| `heartbeat` | — | — | not emitted in 0.1.0 |
+| Event type | Claude Code | Codex | OpenCode | Source |
+|---|---|---|---|---|
+| `session.started` | — | ✅ | ✅ | `session_meta` line / `session` row |
+| `session.ended` | — | — | ✅ | `session.time_archived` or `time_compacting` |
+| `user.prompted` | ✅ | ✅ | ✅ | `user` line / `user_message` / `text` part of a user message |
+| `agent.turn.started` | — | ✅ | — | `turn_context` |
+| `agent.turn.ended` | — | ✅ | — | `task_complete` |
+| `model.request` | — | — | — | not emitted in 0.1.0 |
+| `model.response` | ✅ | — | — | `assistant` line with `usage` |
+| `tool.started` | ✅ | ✅ | — | `tool_use` / `function_call`, `custom_tool_call` |
+| `tool.completed` | ✅ | ✅ | ✅ | `tool_result` / `*_output` / `tool` part, `status: completed` |
+| `tool.failed` | ✅ | ✅ | ✅ | `is_error` / non-zero exit / `status: error` |
+| `file.read` | ✅ | ✅ | ✅ | `Read` tool / pager & `cat`-family commands / `read` tool part |
+| `file.changed` | ✅ | ✅ | ✅ | `Edit`/`Write` input / `apply_patch` body / `edit` & `write` tool parts |
+| `command.executed` | ✅ | ✅ | ✅ | `Bash` tool input / `exec_command_end` / `bash` tool part |
+| `git.commit` | ✅ | ✅ | ✅ | `git log` in repos a session touched — not from the transcript |
+| `git.branch_changed` | — | — | — | not emitted in 0.1.0 |
+| `usage.reported` | — | ✅ | ✅ | `token_count` / `session` row totals — always `cumulative: true` |
+| `error` | — | ✅ | — | `error` / `stream_error` |
+| `heartbeat` | — | — | — | not emitted in 0.1.0 |
+
+OpenCode emits no `tool.started`: one `part` row carries the whole call, so the terminal event is
+timestamped at the call's **start** and carries the real `duration_ms`. The server backfills the
+invocation count from the terminal events, so nothing is lost.
 
 Fields the schema allows but 0.1.0 never populates: `task_category`, `latency_ms`,
-`model.response.turn_id`, `tool.*.duration_ms` (except `command.executed.duration_ms` from Codex),
-`tool.failed.error_kind`, `reported_cost_usd`, `file.read.lines`, `error.fatal`.
+`model.response.turn_id`, `file.read.lines`, `error.fatal`. `reported_cost_usd` is populated by
+OpenCode only — it is the one agent here that records what the provider actually charged.
 
 ---
 
@@ -109,6 +113,29 @@ which is what makes cross-agent cost comparison honest.
 | `cache_creation_input_tokens` | int ≥ 0 | `0` | Written to cache — billed at a premium. Claude Code only. |
 | `output_tokens` | int ≥ 0 | `0` | |
 | `reasoning_output_tokens` | int ≥ 0 | `0` | Thinking tokens. **A subset of `output_tokens`, not additive** — do not sum the two. |
+
+### `Account`
+
+Which account of the agent produced this work. One machine routinely drives several — a personal
+Claude login and a work one, an OpenRouter key and an Anthropic subscription — and without this they
+all collapse into a single identity with a single, wrong, cost split.
+
+Attached to `session.started` and `user.prompted` only; every other event inherits it from its
+session.
+
+| Field | Type | Sent in | Notes |
+|---|---|---|---|
+| `key` | string ✅ | **all modes** | Stable, opaque, non-PII. Claude Code: `oauthAccount.accountUuid`. OpenCode: `<serviceID>:<accountId>`, **never** the credential. This is what makes sessions split per account, which has to work in `metadata` mode too — there the account simply shows as opaque rather than as an email. |
+| `label` | string | `analytics`, `full` | Email or display name. **PII** — stripped by the privacy pipeline in `metadata` mode. |
+| `org` | string | `analytics`, `full` | Organization name. **PII** — stripped in `metadata` mode. |
+| `provider` | string | all modes | `anthropic`, `openrouter`, `openai`, … |
+
+**Live events only.** `~/.claude.json` and OpenCode's `account.json` record who is signed in *now*
+and keep no history: they are rewritten in place on an account switch. So an event whose
+`occurred_at` predates the collector's start — a transcript already on disk at first run, or
+anything from a window when the daemon was down — carries **no** `account` at all rather than
+today's account, which would be a plausible-looking lie. Live events, written while the collector
+was watching, carry one. Both files are re-read every scan cycle (cached on mtime), not once at boot.
 
 ### `RepoContext`
 
@@ -135,8 +162,13 @@ session's working directory.
 | Field | Type | Notes |
 |---|---|---|
 | `external_session_id` | string ✅ | The agent's own session id. |
-| `cwd` | string | Subject to `privacy.file_paths`. |
+| `cwd` | string | The project root. **Dropped** unless `privacy.file_paths` is `absolute`. |
 | `model` | string | Model the session opened with. |
+| `provider` | string | Provider the session ran on, when the agent records one. |
+| `agent_mode` | string | The agent's own mode label — OpenCode's `build` / `plan`. |
+| `parent_session_id` | string | Set on a sub-agent session (OpenCode's `task` tool). |
+| `derived_title` | string | Same privacy rules as on `user.prompted`. OpenCode names its own sessions. |
+| `account` | `Account` | See below. |
 | `repo` | `RepoContext` | |
 
 #### `session.ended`
@@ -164,6 +196,7 @@ The event where privacy mode is most visible.
 | `derived_title` | string (≤200) | `analytics`, `full` — the first meaningful line of the prompt, computed **on your machine** and truncated to 120 characters; the raw text is then deleted. Dropped in `analytics` under `privacy.prompts: never`, and in `metadata` by the mode itself. Not yet dropped by `never` under `mode: full` |
 | `task_category` | enum | schema only — not populated in 0.1.0 |
 | `prompt_text` | string | **`full` mode with `privacy.prompts: full` only.** Redacted first; absent entirely otherwise. |
+| `account` | `Account` | all modes — but `label` and `org` only in `analytics` and `full`. See below. |
 
 #### `agent.turn.started` / `agent.turn.ended`
 
@@ -206,8 +239,8 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 | `usage` | `TokenUsage` ✅ | |
 | `model` | string | |
 | `provider` | string | |
-| `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** Codex always emits `true`. |
-| `reported_cost_usd` | number ≥ 0 | Only when the agent exposes a cost. Drives `basis: REPORTED` rather than `ESTIMATED`. |
+| `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** Codex and OpenCode always emit `true`. |
+| `reported_cost_usd` | number ≥ 0 | Only when the agent exposes a cost. Drives `basis: REPORTED` rather than `ESTIMATED`. OpenCode's `session.cost` is a real settled provider charge and lands here. |
 | `plan_type` | string | Subscription plan where known — a subscription "cost" is always an API-equivalent estimate and is labelled as such. |
 
 ### Tools

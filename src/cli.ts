@@ -226,7 +226,9 @@ program
     for (const adapter of buildAdapters(config)) {
       const health = await adapter.health();
       const mark = health.healthy ? pc.green('✓') : pc.red('✗');
-      console.log(`  ${mark} ${adapter.id.padEnd(14)} ${health.healthy ? `${health.filesTracked} transcripts` : health.error ?? 'unavailable'}`);
+      // "sessions" rather than "transcripts": OpenCode keeps rows in a database,
+      // not one file per session, and the count means the same thing either way.
+      console.log(`  ${mark} ${adapter.id.padEnd(14)} ${health.healthy ? `${health.filesTracked} sessions` : health.error ?? 'unavailable'}`);
     }
   });
 
@@ -259,10 +261,16 @@ program
     console.log('\n' + pc.bold('Agents'));
     for (const adapter of buildAdapters(config)) {
       const detection = await adapter.detect();
-      check(detection.installed, `${adapter.id} transcripts found`, detection.note);
-      if (detection.installed) {
+      check(detection.installed, `${adapter.id} sessions found`, detection.note);
+      if (!detection.installed) continue;
+      if (detection.watchPaths.length > 0) {
         const files = detection.watchPaths.flatMap((p) => listTranscripts(p));
         console.log(`    ${pc.dim(`${files.length} file(s) modified in the last 7 days`)}`);
+      } else {
+        // A database-backed adapter has no files to count; name the source instead
+        // of reporting a confident zero.
+        const health = await adapter.health();
+        console.log(`    ${pc.dim(`${health.filesTracked} session(s) in ${detection.note ?? 'the agent database'}`)}`);
       }
     }
 
