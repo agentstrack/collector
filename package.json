@@ -34,7 +34,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.12",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
