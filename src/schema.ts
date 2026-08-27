@@ -56,7 +56,9 @@ export const EventEnvelope = z.object({
   agent: z.enum(AGENTS),
   agent_version: z.string().max(50).optional(),
   event_type: z.enum(EVENT_TYPES),
-  payload: z.record(z.unknown()).default({}),
+  // zod 4 requires an explicit key schema for z.record(); string keys is the
+  // same runtime behaviour z.record(z.unknown()) had under zod 3.
+  payload: z.record(z.string(), z.unknown()).default({}),
 });
 export type EventEnvelope = z.infer<typeof EventEnvelope>;
 

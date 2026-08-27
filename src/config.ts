@@ -30,7 +30,11 @@ export const Config = z.object({
       shell_arguments: z.enum(['never', 'redact_secrets', 'full']).default('redact_secrets'),
       excluded_projects: z.array(z.string()).default([]),
     })
-    .default({}),
+    // zod 4: every key here already has its own .default(), so the object
+    // schema's *input* type is `{}` (all-optional) but its parsed type is
+    // fully populated — .default() now types against the input, .prefault()
+    // (pre-parse default) is the zod4 replacement for this shape.
+    .prefault({}),
 
   tracking: z
     .object({
@@ -39,7 +43,7 @@ export const Config = z.object({
       process_metrics: z.boolean().default(true),
       agents: z.array(z.string()).default(['claude_code', 'codex', 'opencode']),
     })
-    .default({}),
+    .prefault({}),
 
   upload: z
     .object({
@@ -47,7 +51,7 @@ export const Config = z.object({
       interval_seconds: z.number().int().min(5).max(600).default(30),
       max_retries: z.number().int().min(0).max(20).default(8),
     })
-    .default({}),
+    .prefault({}),
 });
 export type Config = z.infer<typeof Config>;
 
