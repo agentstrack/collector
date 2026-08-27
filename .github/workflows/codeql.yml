@@ -1,0 +1,62 @@
+name: CodeQL
+
+# Static analysis of the collector's own source. Worth having on a tool that
+# runs on developers' machines and handles an API key: the interesting classes
+# here are injection into the `git` / `launchctl` / `systemctl` subprocesses,
+# path handling in the tailer, and anything that could route a secret into a
+# log line.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so a newly published query rule finds existing code rather than
+    # waiting for the next commit. Monday 07:20 UTC, off the hour to avoid the
+    # scheduling stampede.
+    - cron: '20 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze javascript-typescript
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload the SARIF results to the Security tab.
+      security-events: write
+      contents: read
+      actions: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          # security-and-quality adds maintainability queries on top of the
+          # default security set; the codebase is small enough to keep clean.
+          queries: security-and-quality
+
+      # TypeScript is analysed from source, so no build is needed — but the
+      # dependency tree helps CodeQL resolve imports, and `dist/` is gitignored
+      # anyway so there is nothing generated to accidentally scan.
+      - name: Install
+        run: npm ci
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript

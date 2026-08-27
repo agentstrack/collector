@@ -1,0 +1,55 @@
+version: 2
+
+# This package is installed globally on developers' machines, so every
+# dependency is supply-chain surface (CONTRIBUTING.md: no new runtime deps
+# without discussion). Keeping the small set we do have current is cheap; the
+# grouping is what stops that from being six PRs a week.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      prefix-development: chore
+      include: scope
+    labels:
+      - dependencies
+    groups:
+      # One PR a week for the routine bumps. CI runs the full matrix on it, so
+      # a green group PR is a single merge.
+      minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    # Majors arrive as individual PRs on purpose — better-sqlite3 majors mean a
+    # new prebuild ABI, and a TypeScript major can change what `strict` accepts.
+    # Each deserves to be read on its own.
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    labels:
+      - dependencies
+      - ci
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

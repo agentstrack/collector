@@ -1,0 +1,10 @@
+export * from './schema.js';
+export * from './config.js';
+export { Collector, buildAdapters, listTranscripts, VERSION } from './daemon.js';
+export { ClaudeCodeAdapter } from './adapters/claude.js';
+export { CodexAdapter } from './adapters/codex.js';
+export type { AgentAdapter, DetectionResult, HealthStatus, NormalizedEvent } from './adapters/types.js';
+export { redact, BUILTIN_RULES } from './privacy/redact.js';
+export { applyPrivacy } from './privacy/pipeline.js';
+export { Spool } from './queue/spool.js';
+export { ApiClient } from './transport/client.js';

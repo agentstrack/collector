@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/agentstrack/collector/security/advisories/new
+    about: Please report security issues privately — never as a public issue. See SECURITY.md.
+  - name: 💬 Questions and discussion
+    url: https://github.com/agentstrack/collector/discussions
+    about: Usage questions, ideas, and anything that is not yet a bug report.
+  - name: 📚 Documentation
+    url: https://github.com/agentstrack/collector#readme
+    about: Command reference, configuration reference, and the privacy deep-dive.

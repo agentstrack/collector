@@ -1,0 +1,33 @@
+# https://editorconfig.org
+# Matches the style already in src/ — 2-space, LF, UTF-8, final newline.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 110
+
+# Markdown: two trailing spaces are a hard line break, so leave them alone.
+[*.md]
+trim_trailing_whitespace = false
+
+# YAML has no tabs at all; keeping this explicit stops an editor default from
+# producing a workflow file GitHub refuses to parse.
+[*.{yml,yaml}]
+indent_size = 2
+
+# Generated. Never hand-edited, so no rules to enforce.
+[{package-lock.json,dist/**}]
+insert_final_newline = false
+trim_trailing_whitespace = false
+
+# Fixtures are one JSON object per line, copied from an agent's own log.
+# Reformatting one would change what it is testing.
+[test/fixtures/*.jsonl]
+insert_final_newline = true
+trim_trailing_whitespace = false
+max_line_length = off

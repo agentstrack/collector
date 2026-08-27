@@ -1,0 +1,22 @@
+# Normalize to LF in the repository, whatever the contributor's platform does
+# locally. The collector parses newline-delimited JSON; a CRLF sneaking into a
+# fixture changes what the test is asserting.
+* text=auto eol=lf
+
+# Explicitly text, so a diff is a diff and not "binary files differ".
+*.ts        text eol=lf
+*.js        text eol=lf
+*.json      text eol=lf
+*.jsonl     text eol=lf
+*.md        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+*.plist     text eol=lf
+
+# Generated: collapsed in PR diffs and excluded from language statistics.
+# `dist/` is gitignored, but is listed so a stray commit of it is still quiet.
+package-lock.json  linguist-generated=true -diff
+dist/**            linguist-generated=true -diff
+
+# Fixtures are test data, not code the project is written in.
+test/fixtures/**   linguist-vendored=true
