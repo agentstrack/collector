@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/@agentstrack/collector.svg)](https://www.npmjs.com/package/@agentstrack/collector)
 [![CI](https://github.com/agentstrack/collector/actions/workflows/ci.yml/badge.svg)](https://github.com/agentstrack/collector/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org)
 
 `@agentstrack/collector` turns the records Claude Code, Codex and OpenCode already keep on your
 machine into a normalized event stream:
@@ -30,7 +30,7 @@ before anything is: [Verify it yourself](#verify-it-yourself).
 ## Quick start
 
 ```bash
-npm install -g @agentstrack/collector       # requires Node >= 20
+npm install -g @agentstrack/collector       # requires Node >= 24
 
 agentstrack login at_live_xxxxxxxx_xxxxxxxx  # key from Settings → API keys
 agentstrack start                            # installs a login service and starts collecting
@@ -746,7 +746,7 @@ means for each.
 - **Process metrics.** `tracking.process_metrics` is accepted and ignored.
 - **`session.ended`, `heartbeat`, `model.request` and `git.branch_changed`** are in the schema but no adapter emits them yet.
 - **Local task classification** (`task_category`) — the field exists in the schema; the collector only derives a title.
-- **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 20+ does.
+- **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 24+ does.
 - **Content-derived `event_id`.** Ids are random per enqueue, so retrying a batch is safe but re-reading a truncated transcript would create duplicates.
 - **`MultiEdit`.** The Claude Code adapter derives file changes from `Edit`, `Write`, `NotebookEdit` and `Read`; a `MultiEdit` call is still recorded as `tool.started`/`tool.completed`, but produces no `file.changed` events and no line counts.
 
