@@ -70,7 +70,7 @@ this column is what the adapters in this repository actually produce.
 | Event type | Claude Code | Codex | OpenCode | Source |
 |---|---|---|---|---|
 | `session.started` | — | ✅ | ✅ | `session_meta` line / `session` row |
-| `session.ended` | — | — | ✅ | `session.time_archived` or `time_compacting` |
+| `session.ended` | ✅ | ✅ | ✅ | daemon idle timeout (`reason: timeout`, `unknown` on shutdown) / `session.time_archived` or `time_compacting` |
 | `user.prompted` | ✅ | ✅ | ✅ | `user` line / `user_message` / `text` part of a user message |
 | `agent.turn.started` | — | ✅ | — | `turn_context` |
 | `agent.turn.ended` | — | ✅ | — | `task_complete` |
@@ -78,7 +78,7 @@ this column is what the adapters in this repository actually produce.
 | `model.response` | ✅ | — | — | `assistant` line with `usage` |
 | `tool.started` | ✅ | ✅ | — | `tool_use` / `function_call`, `custom_tool_call` |
 | `tool.completed` | ✅ | ✅ | ✅ | `tool_result` / `*_output` / `tool` part, `status: completed` |
-| `tool.failed` | ✅ | ✅ | ✅ | `is_error` / non-zero exit / `status: error` |
+| `tool.failed` | ✅ | ✅ | ✅ | `is_error` / `exec_command_end` exit code, `Exit code: N` output header / `status: error` |
 | `file.read` | ✅ | ✅ | ✅ | `Read` tool / pager & `cat`-family commands / `read` tool part |
 | `file.changed` | ✅ | ✅ | ✅ | `Edit`/`Write` input / `apply_patch` body / `edit` & `write` tool parts |
 | `command.executed` | ✅ | ✅ | ✅ | `Bash` tool input / `exec_command_end` / `bash` tool part |
@@ -109,7 +109,7 @@ which is what makes cross-agent cost comparison honest.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `input_tokens` | int ≥ 0 | `0` | |
-| `cached_input_tokens` | int ≥ 0 | `0` | Read from cache — billed at a reduced rate. Claude Code's `cache_read_input_tokens`. |
+| `cached_input_tokens` | int ≥ 0 | `0` | Read from cache — billed at a reduced rate. **Exclusive of `input_tokens`**: the two never overlap. Claude Code's `cache_read_input_tokens` already is; Codex's `cached_input_tokens` is a subset of its `input_tokens`, so the collector subtracts it; OpenCode's `tokens_cache_read` is already separate. |
 | `cache_creation_input_tokens` | int ≥ 0 | `0` | Written to cache — billed at a premium. Claude Code only. |
 | `output_tokens` | int ≥ 0 | `0` | |
 | `reasoning_output_tokens` | int ≥ 0 | `0` | Thinking tokens. **A subset of `output_tokens`, not additive** — do not sum the two. |
@@ -177,6 +177,7 @@ session's working directory.
 |---|---|---|
 | `external_session_id` | string ✅ | |
 | `reason` | `normal` \| `timeout` \| `crash` \| `unknown` | Defaults to `unknown`. |
+| `end_kind` | `archived` \| `compacted` | OpenCode only — what the editor actually did to the session. It always sends `reason: normal`; the enum above has no room for the distinction, and the server keeps unknown keys. |
 
 #### `heartbeat`
 
@@ -239,7 +240,7 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 | `usage` | `TokenUsage` ✅ | |
 | `model` | string | |
 | `provider` | string | |
-| `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** Codex and OpenCode always emit `true`. |
+| `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** Codex and OpenCode always emit `true`. Known limit: the total is session-wide but tagged with the *current* model, and the server gauges per model, so a session that switches model mid-way (`/model`) has its whole total counted under both. Codex's per-turn `last_token_usage` was measured against real rollouts and does not reconcile to the final total (duplicate snapshots, resets), so the gauge stays. |
 | `reported_cost_usd` | number ≥ 0 | Only when the agent exposes a cost. Drives `basis: REPORTED` rather than `ESTIMATED`. OpenCode's `session.cost` is a real settled provider charge and lands here. |
 | `plan_type` | string | Subscription plan where known — a subscription "cost" is always an API-equivalent estimate and is labelled as such. |
 

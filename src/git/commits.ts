@@ -1,5 +1,5 @@
 import type { NormalizedEvent } from '../adapters/types.js';
-import { commitsSince, findGitRoot } from './repo.js';
+import { commitShasSince, commitStat, findGitRoot } from './repo.js';
 
 /**
  * Emits `git.commit` for commits that land while a session is running.
@@ -22,11 +22,20 @@ export interface WatchedRepo {
 /** Nothing older than this is attributed to a session, however far back its transcript runs. */
 const MAX_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 
+/** Overlap added below each repo's last poll time so a commit landing right at the boundary is not missed. */
+const POLL_OVERLAP_MS = 60 * 1000;
+
 export class GitCommitWatcher {
   /** One entry per repo: the session most recently active in it. */
   private readonly repos = new Map<string, WatchedRepo>();
-  /** SHAs already emitted, so a commit is reported once and not once per scan. */
-  private readonly emitted = new Set<string>();
+  /**
+   * `${gitRoot}:${sha}` -> ms it was emitted. Guards against re-emitting a
+   * commit; pruned by age instead of cleared wholesale, so nothing still inside
+   * the lookback window is ever re-reported.
+   */
+  private readonly emitted = new Map<string, number>();
+  /** gitRoot -> ms of the last poll, so the next `git log --since` starts from there. */
+  private readonly lastPolled = new Map<string, number>();
   /** cwd -> git root, so a repeated cwd costs no filesystem walk. */
   private readonly roots = new Map<string, string | null>();
 
@@ -72,27 +81,41 @@ export class GitCommitWatcher {
     const watched = [...this.repos.values()];
     this.repos.clear();
     const events: NormalizedEvent[] = [];
+    const floor = now.getTime() - MAX_LOOKBACK_MS;
 
     for (const repo of watched) {
-      const since = new Date(Math.max(repo.since.getTime(), now.getTime() - MAX_LOOKBACK_MS));
-      for (const commit of await commitsSince(repo.gitRoot, since)) {
-        const key = `${repo.gitRoot}:${commit.sha}`;
-        if (this.emitted.has(key)) continue;
-        this.emitted.add(key);
+      // Start from the later of: the session's own window, the last time we
+      // polled this repo (minus a small overlap), and the hard lookback floor.
+      // The last-poll bound keeps `git log` from re-scanning history it already
+      // covered on every 5s tick.
+      const lastPolled = this.lastPolled.get(repo.gitRoot);
+      const sinceMs = Math.max(
+        repo.since.getTime(),
+        lastPolled === undefined ? -Infinity : lastPolled - POLL_OVERLAP_MS,
+        floor,
+      );
+      this.lastPolled.set(repo.gitRoot, now.getTime());
 
+      for (const ref of await commitShasSince(repo.gitRoot, new Date(sinceMs))) {
+        const key = `${repo.gitRoot}:${ref.sha}`;
+        if (this.emitted.has(key)) continue;
+        this.emitted.set(key, now.getTime());
+
+        // Diffstat is fetched only for a commit we have not emitted before.
+        const stat = await commitStat(repo.gitRoot, ref.sha);
         events.push({
           event: {
-            occurred_at: commit.committedAt,
+            occurred_at: ref.committedAt,
             session_id: repo.sessionId,
             agent: repo.agent,
             agent_version: repo.agentVersion,
             event_type: 'git.commit',
             payload: {
-              sha: commit.sha,
-              committed_at: commit.committedAt,
-              additions: commit.additions,
-              deletions: commit.deletions,
-              files_changed: commit.filesChanged,
+              sha: ref.sha,
+              committed_at: ref.committedAt,
+              additions: stat.additions,
+              deletions: stat.deletions,
+              files_changed: stat.filesChanged,
             },
           },
           cwd: repo.gitRoot,
@@ -100,9 +123,11 @@ export class GitCommitWatcher {
       }
     }
 
-    // The set only guards against re-emitting inside one process; a long-lived
-    // daemon should not grow it forever.
-    if (this.emitted.size > 5000) this.emitted.clear();
+    // Prune only entries past the window; anything still inside it must stay so
+    // it is never re-emitted.
+    for (const [key, at] of this.emitted) {
+      if (at < floor) this.emitted.delete(key);
+    }
     return events;
   }
 }

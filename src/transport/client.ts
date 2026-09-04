@@ -1,5 +1,12 @@
+import { createRequire } from 'node:module';
 import { gzipSync } from 'node:zlib';
+import { z } from 'zod';
 import type { EventEnvelope } from '../schema.js';
+
+/** Read from package.json so the CLI, register and health can never drift from what is published. */
+export const VERSION: string = (
+  createRequire(import.meta.url)('../../package.json') as { version: string }
+).version;
 
 /**
  * HTTP client for the AgentsTrack API.
@@ -13,11 +20,24 @@ export interface ClientOptions {
   timeoutMs?: number;
 }
 
-export interface BatchResult {
-  accepted: number;
-  duplicates: number;
-  rejected: { index: number; reason: string }[];
-}
+/**
+ * The batch response is a trust boundary: a proxy error page or a newer
+ * server shape must fail loudly here, not surface as `undefined.length` deep
+ * in the upload policy. `quota` arrives only from servers that meter events.
+ */
+export const BatchResult = z.object({
+  accepted: z.number().int().nonnegative(),
+  duplicates: z.number().int().nonnegative(),
+  rejected: z.array(z.object({ index: z.number().int(), reason: z.string() })),
+  quota: z
+    .object({
+      limit: z.number().nullable(),
+      used: z.number().nullable(),
+      exceeded: z.boolean(),
+    })
+    .optional(),
+});
+export type BatchResult = z.infer<typeof BatchResult>;
 
 export interface ServerConfig {
   privacy_mode: 'metadata' | 'analytics' | 'full';
@@ -34,6 +54,8 @@ export class ApiError extends Error {
     readonly status: number,
     /** Whether trying again later could succeed. */
     readonly retryable: boolean,
+    /** Server-requested minimum wait before the next attempt, from Retry-After. */
+    readonly retryAfterMs?: number,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -61,7 +83,13 @@ export class ApiClient {
   }
 
   async sendBatch(events: EventEnvelope[]): Promise<BatchResult> {
-    return this.request('POST', '/v1/events/batch', { events }, true);
+    const raw = await this.request<unknown>('POST', '/v1/events/batch', { events }, true);
+    const parsed = BatchResult.safeParse(raw);
+    if (!parsed.success) {
+      // Not acking on a response we cannot read: the events stay spooled.
+      throw new ApiError('POST /v1/events/batch returned an unreadable response', 200, true);
+    }
+    return parsed.data;
   }
 
   async health(input: { collector_id: string; queue_depth: number; version?: string; privacy_mode?: string; agents: { agent: string; version?: string }[] }): Promise<{ ok: boolean }> {
@@ -73,6 +101,7 @@ export class ApiClient {
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.options.apiKey}`,
       accept: 'application/json',
+      'user-agent': `agentstrack-collector/${VERSION}`,
     };
 
     let payload: Buffer | string | undefined;
@@ -102,6 +131,7 @@ export class ApiClient {
           `${method} ${path} failed: ${response.status} ${text.slice(0, 200)}`,
           response.status,
           retryable,
+          retryAfterMs(response.headers.get('retry-after-ingest') ?? response.headers.get('retry-after')),
         );
       }
       return (await response.json()) as T;
@@ -117,6 +147,15 @@ export class ApiClient {
       clearTimeout(timeout);
     }
   }
+}
+
+/** Retry-After is either delta-seconds or an HTTP date. Unparseable means no request. */
+export function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const at = Date.parse(header);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
 }
 
 /** Exponential backoff with jitter, capped. */

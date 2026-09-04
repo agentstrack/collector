@@ -63,4 +63,23 @@ describe('GitCommitWatcher', () => {
     watcher.observe([event('sess-2', new Date(Date.now() + 60_000))]);
     expect(await watcher.poll()).toEqual([]);
   });
+
+  it('emits only newly-appearing commits on a later poll, not the ones already seen', async () => {
+    const watcher = new GitCommitWatcher();
+    watcher.observe([event('sess-3', new Date(Date.now() - 60_000))]);
+    const first = await watcher.poll();
+    expect(first).toHaveLength(1);
+    const firstSha = String(first[0]!.event.payload['sha']);
+
+    writeFileSync(join(repo, 'b.txt'), 'three\n');
+    git('add', '.');
+    git('commit', '-qm', 'second');
+
+    watcher.observe([event('sess-3', new Date(Date.now() - 60_000))]);
+    const second = await watcher.poll();
+    expect(second).toHaveLength(1);
+    const secondSha = String(second[0]!.event.payload['sha']);
+    expect(secondSha).not.toBe(firstSha);
+    expect(second[0]!.event.payload['files_changed']).toBe(1);
+  });
 });

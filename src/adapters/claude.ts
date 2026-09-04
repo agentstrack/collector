@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { deterministicEventId } from '../queue/event-id.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AccountIdentity, AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent } from './types.js';
-import { num, safeJsonParse, str } from './types.js';
+import { newestJsonl, num, readHeadLines, safeJsonParse, str } from './types.js';
 import { readClaudeAccount } from './account.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
@@ -21,12 +22,32 @@ import { deriveTitle } from '../sessions/title.js';
  *             "output_tokens_details":{"thinking_tokens":257}}},"timestamp":"…"}
  *
  * Tool calls appear as tool_use / tool_result blocks inside message.content.
+ * One API response is written as SEVERAL assistant lines — one per content
+ * block (thinking, text, tool_use) — each repeating the same message.id and
+ * the same usage. Usage is therefore billed once per message.id, not per line.
  */
 export const CLAUDE_DIR = process.env['CLAUDE_CONFIG_DIR'] ?? join(homedir(), '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
 
+/**
+ * Claude Code's own markup on a user line: slash-command echoes and background
+ * task completions. They are not typed by a human and must not count as
+ * prompts or as human-active time.
+ */
+const MARKUP_PROMPT = /^<(task-notification|local-command-stdout|command-message|command-name)[\s>]/;
+
+interface FileState {
+  /** message.id of the last assistant line whose usage was emitted. */
+  lastMessageId?: string;
+  /** tool_use id → tool name; tool_result blocks carry only the id. */
+  tools: Map<string, string>;
+}
+
 export class ClaudeCodeAdapter implements AgentAdapter {
   readonly id = 'claude_code';
+
+  /** Cross-line facts within one transcript: a message's lines are contiguous. */
+  private readonly fileState = new Map<string, FileState>();
 
   async detect(): Promise<DetectionResult> {
     if (!existsSync(PROJECTS_DIR)) {
@@ -37,11 +58,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       // The version is stamped on every transcript line; read one cheaply.
       const projects = readdirSync(PROJECTS_DIR).slice(0, 5);
       for (const project of projects) {
-        const files = readdirSync(join(PROJECTS_DIR, project)).filter((f) => f.endsWith('.jsonl'));
-        if (files.length === 0) continue;
-        // The version is stamped on every transcript line; read the newest one
-        // rather than reporting a placeholder string as the agent version.
-        version = readVersionFromTranscript(join(PROJECTS_DIR, project, files[0]!));
+        const file = newestJsonl(join(PROJECTS_DIR, project));
+        if (!file) continue;
+        version = readVersionFromTranscript(file);
         if (version) break;
       }
     } catch {
@@ -102,54 +121,74 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       payload: Record<string, unknown>,
     ): NormalizedEvent => ({ event: { ...base, event_type, payload }, cwd, repo });
 
-    void ctx;
+    let state = this.fileState.get(ctx.sourceFile);
+    if (!state) {
+      state = { tools: new Map() };
+      this.fileState.set(ctx.sourceFile, state);
+    }
 
-    if (type === 'user') return this.normalizeUser(raw, wrap);
-    if (type === 'assistant') return this.normalizeAssistant(raw, wrap);
+    if (type === 'user') return this.normalizeUser(raw, state, wrap);
+    if (type === 'assistant') return this.normalizeAssistant(raw, state, wrap);
     return [];
   }
 
   private normalizeUser(
     raw: Record<string, unknown>,
+    state: FileState,
     wrap: (t: NormalizedEvent['event']['event_type'], p: Record<string, unknown>) => NormalizedEvent,
   ): NormalizedEvent[] {
     const message = (raw['message'] ?? {}) as Record<string, unknown>;
     const content = message['content'];
 
     // A "user" line is either a real human prompt or a tool result the agent
-    // fed back to itself. Only the former is human interaction time.
-    if (Array.isArray(content)) {
+    // fed back to itself. Only the former is human interaction time. A prompt
+    // arrives as a string, or as text/image blocks when something was pasted.
+    let text: string | undefined;
+    if (typeof content === 'string') text = content;
+    else if (Array.isArray(content)) {
       const events: NormalizedEvent[] = [];
+      const texts: string[] = [];
       for (const block of content) {
         if (!block || typeof block !== 'object') continue;
         const b = block as Record<string, unknown>;
+        if (b['type'] === 'text') {
+          const t = str(b['text']);
+          if (t) texts.push(t);
+          continue;
+        }
         if (b['type'] !== 'tool_result') continue;
+        const id = str(b['tool_use_id']);
         const failed = b['is_error'] === true;
         events.push(
           wrap(failed ? 'tool.failed' : 'tool.completed', {
-            tool_name: str(b['name']) ?? 'unknown',
-            tool_call_id: str(b['tool_use_id']),
+            tool_name: (id && state.tools.get(id)) ?? 'unknown',
+            tool_call_id: id,
           }),
         );
+        if (id) state.tools.delete(id);
       }
-      return events;
+      if (events.length > 0) return events;
+      text = texts.join('\n');
     }
 
-    if (typeof content !== 'string') return [];
-    // Meta lines (command output, system reminders) are not prompts.
+    if (!text) return [];
+    // Meta lines (command output, system reminders) and Claude Code's own
+    // markup are not prompts.
     if (raw['isMeta'] === true || str(raw['promptSource']) === 'system') return [];
+    if (MARKUP_PROMPT.test(text.trimStart())) return [];
 
     return [
       wrap('user.prompted', {
-        prompt_chars: content.length,
-        prompt_text: content,
-        derived_title: deriveTitle(content),
+        prompt_chars: text.length,
+        prompt_text: text,
+        derived_title: deriveTitle(text),
       }),
     ];
   }
 
   private normalizeAssistant(
     raw: Record<string, unknown>,
+    state: FileState,
     wrap: (t: NormalizedEvent['event']['event_type'], p: Record<string, unknown>) => NormalizedEvent,
   ): NormalizedEvent[] {
     const message = (raw['message'] ?? {}) as Record<string, unknown>;
@@ -159,14 +198,23 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     // analytics or the cost table.
     if (!model || model.startsWith('<')) return [];
 
-    const events: NormalizedEvent[] = [
-      wrap('model.response', {
-        model,
-        provider: 'anthropic',
-        usage: readUsage(message['usage']),
-        stop_reason: str(message['stop_reason']),
-      }),
-    ];
+    const events: NormalizedEvent[] = [];
+    // Every line of one response repeats the same usage; bill it once.
+    const messageId = str(message['id']) ?? str(raw['requestId']);
+    if (!messageId || messageId !== state.lastMessageId) {
+      state.lastMessageId = messageId;
+      events.push({
+        ...wrap('model.response', {
+          model,
+          provider: 'anthropic',
+          usage: readUsage(message['usage']),
+          stop_reason: str(message['stop_reason']),
+        }),
+        // Keyed on the message, not the line: a restart between two lines of
+        // the same response must dedupe on the server, not bill twice.
+        eventId: messageId ? deterministicEventId(`claude_code\nmodel.response\n${messageId}`) : undefined,
+      });
+    }
 
     const content = message['content'];
     if (Array.isArray(content)) {
@@ -175,7 +223,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         const b = block as Record<string, unknown>;
         if (b['type'] !== 'tool_use') continue;
         const toolName = str(b['name']) ?? 'unknown';
-        events.push(wrap('tool.started', { tool_name: toolName, tool_call_id: str(b['id']) }));
+        const toolId = str(b['id']);
+        if (toolId) state.tools.set(toolId, toolName);
+        events.push(wrap('tool.started', { tool_name: toolName, tool_call_id: toolId }));
 
         // Bash invocations are the interesting ones for command analytics.
         const input = (b['input'] ?? {}) as Record<string, unknown>;
@@ -210,14 +260,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
  */
 /** Reads the `version` field off the first line that carries one. */
 function readVersionFromTranscript(file: string): string | undefined {
-  try {
-    for (const line of readFileSync(file, 'utf8').split('\n', 40)) {
-      const parsed = safeJsonParse(line);
-      const version = parsed ? str(parsed['version']) : undefined;
-      if (version) return version;
-    }
-  } catch {
-    // Unreadable transcript: absent version is better than a fabricated one.
+  for (const line of readHeadLines(file)) {
+    const parsed = safeJsonParse(line);
+    const version = parsed ? str(parsed['version']) : undefined;
+    if (version) return version;
   }
   return undefined;
 }

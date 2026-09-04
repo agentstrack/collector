@@ -119,6 +119,21 @@ describe('Spool.fail — poison handling must not lose good events', () => {
     expect(spool.peek(10)[0]!.eventId).toBe(innocent.event_id);
   });
 
+  it('rolls the checkpoint cache back with the transaction', () => {
+    // Regression: setCheckpoint() updated the in-memory Map before COMMIT, so
+    // a failed commit (SQLITE_FULL) left the cache pointing past lines that
+    // were never spooled — and the tailer trusted the cache.
+    const spool = newSpool();
+    spool.setCheckpoint('/t.jsonl', 'ino', 10, 10);
+    expect(() =>
+      spool.transaction(() => {
+        spool.setCheckpoint('/t.jsonl', 'ino', 20, 20);
+        throw new Error('SQLITE_FULL');
+      }),
+    ).toThrow('SQLITE_FULL');
+    expect(spool.getCheckpoint('/t.jsonl')).toEqual({ inode: 'ino', offset: 10, size: 10 });
+  });
+
   it('refuses to treat maxAttempts of 0 as "delete everything"', () => {
     // Regression: `attempts >= 0` matched never-attempted rows, so a config of
     // 0 wiped the whole spool on the first network blip.

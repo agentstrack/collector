@@ -99,14 +99,6 @@ export function describeRepo(cwd: string): RepoContext | undefined {
   return context;
 }
 
-export interface CommitInfo {
-  sha: string;
-  committedAt: string;
-  additions: number;
-  deletions: number;
-  filesChanged: number;
-}
-
 /**
  * git prints local time with an offset; the wire schema only accepts UTC, so an
  * un-normalized timestamp gets the whole event rejected at ingest.
@@ -117,36 +109,61 @@ function toUtcIso(value: string | undefined): string | undefined {
   return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
 }
 
-/** Commits authored in this repo within a time window. */
-export async function commitsSince(gitRoot: string, since: Date): Promise<CommitInfo[]> {
+/** A commit's identity and time, without the (more expensive) diffstat. */
+export interface CommitRef {
+  sha: string;
+  committedAt: string;
+}
+
+/**
+ * The SHAs authored in this repo within a time window — cheap: no diff is
+ * computed. The caller filters out already-seen SHAs before asking for stats,
+ * so `git show --numstat` runs only for genuinely new commits rather than
+ * re-diffing the whole window on every poll.
+ */
+export async function commitShasSince(gitRoot: string, since: Date): Promise<CommitRef[]> {
   try {
     const { stdout } = await exec(
       'git',
-      ['log', `--since=${since.toISOString()}`, '--numstat', '--format=%H%x00%cI', '--no-merges'],
+      ['log', `--since=${since.toISOString()}`, '--format=%H%x00%cI', '--no-merges'],
       { cwd: gitRoot, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
     );
-
-    const commits: CommitInfo[] = [];
-    let current: CommitInfo | null = null;
-
+    const refs: CommitRef[] = [];
     for (const line of stdout.split('\n')) {
-      if (line.includes('\0')) {
-        if (current) commits.push(current);
-        const [sha, committedAt] = line.split('\0');
-        current = { sha: sha!, committedAt: toUtcIso(committedAt) ?? since.toISOString(), additions: 0, deletions: 0, filesChanged: 0 };
-        continue;
-      }
-      if (!current || !line.trim()) continue;
-      const [added, removed] = line.split('\t');
-      // Binary files show '-' rather than a count.
-      current.additions += Number(added) || 0;
-      current.deletions += Number(removed) || 0;
-      current.filesChanged += 1;
+      if (!line.includes('\0')) continue;
+      const [sha, committedAt] = line.split('\0');
+      if (!sha) continue;
+      refs.push({ sha, committedAt: toUtcIso(committedAt) ?? since.toISOString() });
     }
-    if (current) commits.push(current);
-    return commits;
+    return refs;
   } catch {
     // No git binary, not a repo, or a timeout — enrichment is best-effort.
     return [];
   }
+}
+
+/** Diffstat for a single commit. */
+export async function commitStat(
+  gitRoot: string,
+  sha: string,
+): Promise<{ additions: number; deletions: number; filesChanged: number }> {
+  const stat = { additions: 0, deletions: 0, filesChanged: 0 };
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['show', '--numstat', '--format=', '--no-merges', sha],
+      { cwd: gitRoot, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    for (const line of stdout.split('\n')) {
+      if (!line.trim()) continue;
+      const [added, removed] = line.split('\t');
+      // Binary files show '-' rather than a count.
+      stat.additions += Number(added) || 0;
+      stat.deletions += Number(removed) || 0;
+      stat.filesChanged += 1;
+    }
+  } catch {
+    // Best-effort: a commit with no readable diff still reports zeros.
+  }
+  return stat;
 }

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parse, stringify } from 'yaml';
@@ -16,7 +16,18 @@ export const PID_PATH = join(CONFIG_DIR, 'collector.pid');
  * literally valid.
  */
 export const Config = z.object({
-  api_url: z.string().url().default('https://api.agentstrack.ai'),
+  api_url: z
+    .string()
+    .url()
+    // The API key travels as a bearer token on every request, so the transport
+    // must be encrypted. http is allowed only for a loopback dev server.
+    .refine(
+      (u) =>
+        u.startsWith('https://') ||
+        /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(u),
+      'api_url must be https (http is allowed only for localhost)',
+    )
+    .default('https://api.agentstrack.ai'),
   /** Written by `agentstrack login`. File is chmod 600. */
   api_key: z.string().optional(),
   collector_id: z.string().uuid().optional(),
@@ -38,6 +49,19 @@ export const Config = z.object({
 
   tracking: z
     .object({
+      /**
+       * How far back to scan for transcript files, by file mtime.
+       *
+       * 7 days is the steady-state default: a running collector only needs to
+       * notice files the agents are still writing, and widening the walk costs
+       * a stat() per file on every scan.
+       *
+       * It is also what made a first import silently partial — a new install
+       * uploaded the last week and left years of history on disk with no
+       * indication anything had been skipped. Raise it to import that history
+       * (`max_age_days: 3650`), then put it back.
+       */
+      max_age_days: z.number().int().min(1).max(3650).default(7),
       idle_timeout_seconds: z.number().int().min(30).max(3600).default(120),
       git_metadata: z.boolean().default(true),
       process_metrics: z.boolean().default(true),
@@ -50,6 +74,23 @@ export const Config = z.object({
       batch_size: z.number().int().min(1).max(500).default(100),
       interval_seconds: z.number().int().min(5).max(600).default(30),
       max_retries: z.number().int().min(0).max(20).default(8),
+      /**
+       * Batches uploaded at once.
+       *
+       * Uploading is round-trip bound, not bandwidth bound: a backfill of
+       * ~80k events moved at ~330 events/s sequentially, which is one 100-event
+       * batch per ~300ms of mostly waiting. Sending several at once turns the
+       * first import of a laptop's history from tens of minutes into a few.
+       *
+       * Safe because arrival order does not matter: the server derives a
+       * session's start from min(recorded start, earliest event) and re-runs
+       * reconstruction after every batch, so a later batch landing first is
+       * corrected once the rest arrive.
+       *
+       * Capped at 8 to stay well inside the server's ingest bucket (6000
+       * requests/minute) even with several machines importing at once.
+       */
+      concurrency: z.number().int().min(1).max(8).default(4),
     })
     .prefault({}),
 });
@@ -70,8 +111,13 @@ export function loadConfig(): Config {
 
 export function saveConfig(config: Config): void {
   ensureConfigDir();
-  writeFileSync(CONFIG_PATH, stringify(config), 'utf8');
-  // The file holds an API key.
+  // Atomic + owner-only from the moment it exists: write a 0600 temp file, then
+  // rename it over the target. A crash mid-write can no longer leave a
+  // truncated (unparseable) config or a brief window where the key is
+  // world-readable at the umask default.
+  const tmp = `${CONFIG_PATH}.${process.pid}.tmp`;
+  writeFileSync(tmp, stringify(config), { mode: 0o600 });
+  renameSync(tmp, CONFIG_PATH);
   chmodSync(CONFIG_PATH, 0o600);
 }
 
@@ -101,6 +147,7 @@ export const DEFAULT_CONFIG_COMMENT = `# AgentsTrack collector configuration
 #
 # privacy.mode:
 #   metadata  - counts and timings only; no titles, no prompts, no code
-#   analytics - adds locally generated session titles; raw content discarded
+#   analytics - adds a session title (the first line of the prompt, max 120
+#               chars, secret-redacted); raw prompt text discarded
 #   full      - uploads prompt text (opt-in, off by default)
 `;

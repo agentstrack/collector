@@ -33,10 +33,36 @@ describe('ClaudeCodeAdapter', () => {
     expect(prompt!.event.payload['prompt_chars']).toBeGreaterThan(0);
   });
 
-  it('does not treat a tool_result as a human prompt', () => {
-    // The fixture has one real prompt; the tool_result line must not add another.
-    expect(types.filter((t) => t === 'user.prompted')).toHaveLength(1);
-    expect(types).toContain('tool.completed');
+  it('does not treat a tool_result or slash-command markup as a human prompt', () => {
+    // Two real prompts: the string one and the pasted image+text one. The
+    // tool_result line and the <command-name> echo must not add more.
+    const prompts = events.filter((e) => e.event.event_type === 'user.prompted');
+    expect(prompts.map((p) => p.event.payload['derived_title'])).toEqual([
+      'Add tests for the cost calculator',
+      'Why does this test fail?',
+    ]);
+  });
+
+  it('bills usage once per message.id even though each content block is its own line', () => {
+    // msg_01A spans two lines (text, then tool_use) with identical usage.
+    expect(types.filter((t) => t === 'model.response')).toHaveLength(2);
+    // Both lines still contribute their tool blocks.
+    expect(types.filter((t) => t === 'tool.started')).toHaveLength(3);
+  });
+
+  it('keys model.response on message.id, so two collectors (or a restart) agree on the event id', () => {
+    const lines = fixture('claude-session.jsonl');
+    const a = run(new ClaudeCodeAdapter(), lines).filter((e) => e.event.event_type === 'model.response');
+    const b = run(new ClaudeCodeAdapter(), lines.slice(0, 3)).filter((e) => e.event.event_type === 'model.response');
+    expect(a[0]!.eventId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(b[0]!.eventId).toBe(a[0]!.eventId);
+    expect(a[1]!.eventId).not.toBe(a[0]!.eventId);
+  });
+
+  it('resolves tool_result names from the tool_use that started them', () => {
+    // Real tool_result blocks carry only tool_use_id — no name.
+    const done = events.find((e) => e.event.event_type === 'tool.completed');
+    expect(done!.event.payload).toMatchObject({ tool_name: 'Read', tool_call_id: 't1' });
   });
 
   it('captures the full token breakdown including cache and thinking', () => {
@@ -92,6 +118,17 @@ describe('CodexAdapter', () => {
     expect(orphan).toEqual([]);
   });
 
+  it('recovers the session id from the rollout file name after a restart', () => {
+    // session_meta was consumed before the daemon restarted; the file name
+    // carries the same uuid, so later lines must not be dropped.
+    const adapter = new CodexAdapter();
+    const lines = fixture('codex-session.jsonl');
+    const sourceFile = '/tmp/rollout-2026-08-26T09-00-00-019d94f1-c8eb-7582-9345-71eace2149f6.jsonl';
+    const usage = adapter.normalize(lines[8]!, { ...ctx, sourceFile });
+    expect(usage.map((e) => e.event.event_type)).toEqual(['usage.reported']);
+    expect(usage[0]!.event.session_id).toBe('019d94f1-c8eb-7582-9345-71eace2149f6');
+  });
+
   it('picks up the model from turn_context', () => {
     const usage = events.find((e) => e.event.event_type === 'usage.reported');
     expect(usage!.event.payload['model']).toBe('gpt-5.4');
@@ -101,8 +138,8 @@ describe('CodexAdapter', () => {
     const usages = events.filter((e) => e.event.event_type === 'usage.reported');
     expect(usages).toHaveLength(2);
     for (const u of usages) expect(u.event.payload['cumulative']).toBe(true);
-    // Second snapshot supersedes the first — 90000, not 140000.
-    expect((usages[1]!.event.payload['usage'] as { input_tokens: number }).input_tokens).toBe(90000);
+    // Second snapshot supersedes the first — 90000 input of which 60000 cached.
+    expect(usages[1]!.event.payload['usage']).toMatchObject({ input_tokens: 30000, cached_input_tokens: 60000 });
   });
 
   it('flags a subscription plan so cost is reported as an estimate', () => {
@@ -110,9 +147,17 @@ describe('CodexAdapter', () => {
     expect(usage!.event.payload['plan_type']).toBe('plus');
   });
 
-  it('normalizes function calls into tool events', () => {
-    expect(types).toContain('tool.started');
-    expect(types).toContain('tool.completed');
+  it('terminates exec_command on exec_command_end with the real argv, exit code and duration', () => {
+    const c1 = events.filter((e) => e.event.payload['tool_call_id'] === 'c1').map((e) => e.event.event_type);
+    // One start, one terminal — the function_call_output must not add a second.
+    expect(c1).toEqual(['tool.started', 'tool.completed']);
+    const cmd = events.find((e) => e.event.event_type === 'command.executed');
+    expect(cmd!.event.payload).toMatchObject({ command: 'npm test', exit_code: 0, duration_ms: 1500 });
+  });
+
+  it('reads the exit status off the shell_command output header', () => {
+    const failed = events.find((e) => e.event.event_type === 'tool.failed');
+    expect(failed!.event.payload).toMatchObject({ tool_name: 'shell_command', tool_call_id: 'c2' });
   });
 
   it('keeps per-file state separate so two rollouts do not bleed together', () => {
@@ -133,6 +178,11 @@ describe('usage mapping', () => {
     const codex = readCodexUsage({ output_tokens: 500, reasoning_output_tokens: 400 });
     expect(codex.output_tokens).toBe(500);
     expect(codex.reasoning_output_tokens).toBe(400);
+  });
+
+  it('treats Codex cached_input_tokens as a subset of input_tokens, never additive', () => {
+    const codex = readCodexUsage({ input_tokens: 50000, cached_input_tokens: 30000 });
+    expect(codex).toMatchObject({ input_tokens: 20000, cached_input_tokens: 30000 });
   });
 
   it('defaults missing fields to zero rather than NaN', () => {

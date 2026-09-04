@@ -1,3 +1,5 @@
+import { closeSync, openSync, readSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { EventEnvelope, RepoContext } from '../schema.js';
 
 export interface DetectionResult {
@@ -98,6 +100,12 @@ export interface NormalizedEvent {
    * same machine. Takes precedence over adapter.account().
    */
   account?: AccountIdentity;
+  /**
+   * The id to spool the event under, when the adapter knows a seed more
+   * durable than "this line at this offset" — a message id that repeats
+   * across lines, say. Absent: the daemon derives one from the source line.
+   */
+  eventId?: string;
 }
 
 export function safeJsonParse(line: string): Record<string, unknown> | null {
@@ -118,4 +126,59 @@ export function num(value: unknown): number {
 
 export function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/** Head-of-file lines cached on (path, mtime) — see readHeadLines. */
+const headCache = new Map<string, { mtimeMs: number; lines: string[] }>();
+
+/**
+ * The complete lines within the first `bytes` of a file.
+ *
+ * detect() runs every scan cycle and only needs a version string that sits on
+ * the first line, so reading the whole transcript (13 MB for a live Codex
+ * rollout) for it was pure churn. Same (path, mtime) cache as account.ts.
+ */
+export function readHeadLines(path: string, bytes = 16_384): string[] {
+  let stats;
+  try {
+    stats = statSync(path);
+  } catch {
+    headCache.delete(path);
+    return [];
+  }
+  const hit = headCache.get(path);
+  if (hit && hit.mtimeMs === stats.mtimeMs) return hit.lines;
+
+  let lines: string[] = [];
+  try {
+    const fd = openSync(path, 'r');
+    try {
+      const buffer = Buffer.alloc(bytes);
+      const read = readSync(fd, buffer, 0, bytes, 0);
+      lines = buffer.toString('utf8', 0, read).split('\n');
+      if (read === bytes) lines.pop(); // the last line was cut by the window
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // Unreadable file: absent is better than fabricated.
+  }
+  headCache.set(path, { mtimeMs: stats.mtimeMs, lines });
+  return lines;
+}
+
+/** Newest `.jsonl` in a directory by mtime, not by readdir order. */
+export function newestJsonl(dir: string): string | undefined {
+  let best: { path: string; mtimeMs: number } | undefined;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.jsonl')) continue;
+    const path = join(dir, name);
+    try {
+      const { mtimeMs } = statSync(path);
+      if (!best || mtimeMs > best.mtimeMs) best = { path, mtimeMs };
+    } catch {
+      // Removed between readdir and stat.
+    }
+  }
+  return best?.path;
 }

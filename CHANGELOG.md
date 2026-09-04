@@ -10,7 +10,168 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Security
+- **`api_url` must be `https`.** The bearer API key rides on every request, so `http` is now rejected
+  for any host except `localhost`/`127.0.0.1`/`[::1]`. `login` prints the URL it is about to use.
+- **The API key can stay off the command line.** `agentstrack login` now takes the key as an optional
+  argument and otherwise reads `AGENTSTRACK_API_KEY`, an echo-off terminal prompt, or stdin
+  (`agentstrack login < key.txt`), keeping it out of shell history and `ps`.
+- **`config.yaml` is written atomically at mode 600** — a temp file created 0600 then renamed over the
+  target, so a crash can no longer leave a truncated config or a brief world-readable window.
+- **Org redaction rules are bounded.** A server-supplied pattern that is malformed, over 256
+  characters, or using a backreference is skipped (as a malformed rule already was), the common
+  catastrophic nested-quantifier shapes (`(a+)+`, `(a|aa)+`, `((a+)b)+`) are rejected, and org rules
+  match only the first 64 KB of a value — a pathological pattern is much less likely to hang the
+  single-threaded daemon.
+
+### Fixed
+- **Claude Code tokens and cost were inflated ~1.8x.** Claude Code writes one `assistant` line per
+  content block of a single response, each repeating the same `message.id` and usage; every line
+  became a `model.response`. Usage is now emitted once per `message.id`.
+- **Claude Code tool outcomes were all named `unknown`.** `tool_result` blocks carry only a
+  `tool_use_id`; the name is now resolved from the `tool_use` that started the call.
+- **Claude Code prompts pasted with an image (or as text blocks) were never counted**, and slash
+  command echoes (`<command-name>`, `<command-message>`, `<local-command-stdout>`,
+  `<task-notification>`) were counted as human prompts. Both fixed.
+- **Codex sessions went dark after a collector restart.** The session id lived only in memory from
+  `session_meta`; it is now seeded from the rollout file name, which carries the same uuid.
+- **Codex cached tokens were billed twice.** `cached_input_tokens` is a subset of `input_tokens`
+  in Codex; the collector now subtracts it so the two are exclusive, as the schema documents.
+- **Codex shell commands landed as `shell` with `duration_ms: 0` and never failed.**
+  `exec_command_end` carries an argv list, a `{secs,nanos}` duration and a numeric exit code;
+  `function_call_output.output` is a string. Both are read as they really are, and `tool.failed`
+  is emitted on a non-zero exit.
+- **OpenCode `session.ended` was rejected by the server on every emit** (missing
+  `external_session_id`, `reason` outside the enum). It now sends `reason: normal` with the
+  archived/compacted distinction in `end_kind`.
+- **OpenCode resumed sessions never got a `session.started`.** Sessions are fetched by
+  `time_updated` but starts were gated on a `time_created` cursor; a per-session marker in the
+  spool's meta store replaces it.
+- **`logout` now tears the service down first.** It previously left the launchd/systemd unit
+  installed, so the supervisor kept restarting an unauthenticated collector. Both units now restart
+  only on a crash (launchd `KeepAlive`/`SuccessfulExit`, systemd `Restart=on-failure` with a
+  5-in-5-minutes start limit), and the unauthenticated foreground path exits cleanly so the
+  supervisor idles.
+- **Service units handle paths with spaces and non-ASCII characters.** The CLI path is resolved with
+  `fileURLToPath` instead of a percent-encoded `URL.pathname`, plist strings are XML-escaped, and
+  systemd `ExecStart` arguments are quoted. `AGENTSTRACK_HOME` is written into the unit when set.
+- **A second foreground `start` refuses to run** when one is already collecting (checked via the pid
+  file, created with `wx`), preventing two collectors from racing on one spool.
+- **`stop` verifies the pid still belongs to a collector** (via `ps`) before signalling it, so a
+  recycled pid in a stale pid file is not killed.
+- **`doctor` reports the real scan window.** It now prints `modified in the last N day(s)` using
+  `tracking.max_age_days` instead of a hard-coded "7 days".
+- **`git.commit` polling stops re-diffing history every tick.** Each repo's `git log --since` now
+  starts from its last poll, SHAs are listed before any diffstat so `git show --numstat` runs only for
+  commits not yet emitted, and the emitted-SHA guard is pruned by age instead of cleared wholesale, so
+  a commit inside the lookback window is never re-emitted.
+
+### Changed
+- `detect()` reads only the first 16 KB of the newest transcript (by mtime) for the agent version,
+  cached on mtime, instead of the whole file every 5 s. OpenCode keeps one read-only database
+  handle with prepared statements rather than opening and closing one per query, and caches the
+  version for 60 s.
+- The contract test now runs every adapter fixture through the server's own payload schemas when
+  the server checkout is present, and fails (rather than skips) when `AGENTSTRACK_SERVER_REPO` is
+  set but missing.
+- **Node floor is `>=22`** (was `>=24`), matching `.nvmrc` and the runtime the code actually needs;
+  CI now tests Node 22 and 24.
+- `status` shows an upload-paused reason when one is present.
+
+### Fixed — daemon, queue and transport
+- **The upload failure policy ran once per concurrent batch, not once per wave.** With
+  `upload.concurrency: 4` a dead API escalated the backoff counter by four per wave (5-minute waits
+  after two waves), slept inside the wave so tailing froze for the duration, and a sibling's success
+  reset the counter or undid a `413` halving. `sendBatch` now returns a pure outcome and `flush()`
+  applies the policy once on the wave: halve once, one backoff step, strikes only for poison
+  batches, counter reset only when the whole wave succeeded. Backoff sets a next-upload time instead
+  of sleeping, honours `Retry-After` / `Retry-After-ingest` as the minimum, and a daemon tick sends
+  at most five waves before scanning again. Covered by `src/queue/flush.test.ts`.
+- **`401`/`403` no longer count strikes against telemetry.** They pause uploads (`status` shows the
+  reason), as does an over-quota `200` — previously acked and dropped locally with the `quota` block
+  ignored — and a `200` that rejects every event as malformed, which now logs a version-mismatch
+  error instead of deleting the batch.
+- **Checkpoints were written before the events were spooled.** A throw between the two lost those
+  lines for good. The tailer now streams in 4 MB chunks and commits each chunk's checkpoint in the
+  same transaction as its events; a line over 8 MB is skipped to the next newline and counted, at
+  most 64 MB per file is read per scan, short reads are looped, and one unreadable file no longer
+  aborts the scan for every file after it.
+- **Re-reading a transcript double-counted on the server.** `event_id` was a fresh `randomUUID` per
+  spool write; it is now derived from the adapter, file, byte offset and line content (a UUID v8
+  shape), so a rotated inode, a purged spool or a second collector on the same files dedupes.
+- **`VERSION` was hard-coded `0.1.0`.** It is read from `package.json`; the CLI, register and health
+  report the published version, and every request carries `User-Agent: agentstrack-collector/<v>`.
+- **A Claude Code response spanning a restart was billed twice.** `model.response` is now keyed on
+  `message.id` (the daemon's deterministic id, seeded by the adapter), not on the line, so the
+  server's dedupe absorbs the second line's copy after a restart.
+- **One rejected event paused every upload as a "schema mismatch".** A single-event batch the
+  server rejects is now struck like any other poison event; the pause is reserved for a whole
+  batch rejected without a quota reason.
+- **A failed commit left the checkpoint cache ahead of disk.** `setCheckpoint()` updated the
+  in-memory Map before COMMIT; the cache is now reloaded from the table when a transaction throws.
+- **OpenCode cursors and started-markers were written before the events they covered.** They are
+  now buffered and committed in the same transaction as the enqueue, so a full disk cannot mark a
+  session started that was never spooled.
+- **systemd `WorkingDirectory=` was quoted.** Path-typed settings are not unquoted by systemd; the
+  unit now writes the bare path (`ExecStart=` keeps its quoting).
+- **Claude Code and Codex sessions never ended.** The daemon emits `session.ended`
+  (`reason: timeout`) for a session quiet longer than `tracking.idle_timeout_seconds`, stamped at
+  the moment the timeout elapsed, and `reason: unknown` for anything still open on shutdown.
+- The batch response is validated with zod at the trust boundary; an unreadable body is retried,
+  never acked. Rejected `allSettled` outcomes are logged instead of swallowed. Local `batch_size` is
+  clamped to the server's `max_batch_events`.
+
+### Changed — daemon, queue and transport
+- The spool is `VACUUM`ed at open when the freelist is both over 2048 pages and more than half the
+  file (a 206 MB spool holding 78 events was observed), the WAL is capped at 8 MB
+  (`journal_size_limit`), statements are prepared once, checkpoints are cached in memory so an
+  unchanged file costs no SQL, and WAL/SHM are chmod 600 after they exist.
+- `describeRepo` is cached per scan pass; `flush()`, `reportHealth()` and `depth()` are inside the
+  loop's try/catch; the log rotates once at 5 MB to `collector.log.1` and a scan pass writes one
+  `Queued N events across M files` line instead of one per file.
+- Org redaction rules are compiled once per server-config refresh and handed to the privacy
+  pipeline pre-compiled, instead of being recompiled for every event.
+
+## [0.2.1] — 2026-08-31
+
+### Fixed
+- **A first import silently stopped at 7 days.** `listTranscripts` defaulted to `maxAgeDays = 7` and
+  both call sites took the default, so only transcripts touched in the last week were ever opened —
+  258 of 690 files on the machine this was found on. Everything older stayed on disk with nothing in
+  the output indicating it had been skipped. The window is now `tracking.max_age_days`, still
+  defaulting to 7 so a running collector keeps its cheap steady-state scan and a fresh install does
+  not unexpectedly upload years of history. Set it to `3650`, restart, then set it back to import
+  what is already on disk.
+
+- **OpenCode ignored that window and kept its own.** It reads a live SQLite database rather than
+  tailing files, so it has an independent history floor — also hardcoded to 7 days. Widening
+  `max_age_days` therefore backfilled Claude Code and Codex completely and left OpenCode at 4 of 19
+  sessions. The symptom was a lopsided event mix: 19 `user.prompted` but only 4 `session.started`,
+  because the part cursor and the session-created cursor fell back to that floor differently. The
+  adapter now takes the same setting.
+
+  Together these two are why a full import of one machine went from 63 sessions to 196.
+
 ### Added
+- `tracking.max_age_days` (default 7, max 3650) — see above.
+
+## [0.2.0] — 2026-08-31
+
+### Added
+- **Parallel uploads.** `upload.concurrency` (default 4, max 8) sends that many batches at once.
+  Uploading is round-trip bound rather than bandwidth bound. Measured on an 80k-event backfill:
+  upload throughput ~330 -> ~627 events/s, wall clock 240s -> 175s. The end-to-end gain is smaller
+  than the upload gain because reading and parsing transcripts is single-threaded and becomes the
+  co-bottleneck once uploading stops being one.
+
+  Arrival order is deliberately not preserved across in-flight batches and does not need to be: the
+  server derives a session's start from `min(recorded start, earliest stored event)` and re-runs
+  reconstruction after every batch, so a later batch landing first is corrected once the rest arrive.
+  One `peek` covers the whole wave — peeking per batch would hand identical rows to every request and
+  upload the same events `concurrency` times. A failing batch no longer abandons its siblings; the
+  413 / poison-batch / backoff policy is unchanged.
+
+  Set `upload.concurrency: 1` in `~/.agentstrack/config.yaml` to restore serial uploads.
 - **OpenCode adapter.** Reads `~/.local/share/opencode/opencode.db` (honouring `$XDG_DATA_HOME`,
   `$OPENCODE_DATA_DIR` and `$OPENCODE_DB`) and emits `session.started`, `session.ended`, cumulative
   `usage.reported`, `user.prompted`, `tool.completed` / `tool.failed`, `command.executed`,

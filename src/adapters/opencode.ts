@@ -33,13 +33,14 @@ import { deriveTitle } from '../sessions/title.js';
  *   part    — the timeline: text, tool calls with input/output and timings.
  *
  * THIS IS A LIVE DATABASE THE USER'S EDITOR IS WRITING TO. It is opened
- * read-only with a busy timeout, one short query at a time, and closed again.
- * The collector must never be the reason someone's session data is corrupted
- * or their editor blocks.
+ * read-only with a busy timeout and only short queries run on it. The
+ * collector must never be the reason someone's session data is corrupted or
+ * their editor blocks.
  *
  * Because there are no lines, normalize() has nothing to do and the adapter
  * implements poll() instead (see AgentAdapter.poll). Resumption uses the
- * spool's meta store: three cursors, no per-session bookkeeping.
+ * spool's meta store: two cursors plus one marker per session whose
+ * session.started has been emitted.
  */
 export const OPENCODE_DATA_DIR =
   process.env['OPENCODE_DATA_DIR'] ??
@@ -76,14 +77,33 @@ export function resolveDbPath(dataDir: string = OPENCODE_DATA_DIR): string | und
 }
 
 /** How far back a first-ever poll reaches, matching the tailer's transcript horizon. */
-const BACKFILL_DAYS = 7;
+/**
+ * How far back to reach when no cursor exists yet — a fresh install, or one
+ * whose cursors were reset to re-import history.
+ *
+ * This adapter reads a live database instead of tailing files, so it cannot
+ * use the file-mtime walk the others do and needs its own floor. It was
+ * hardcoded to 7 days, independently of `tracking.max_age_days`, which meant
+ * widening that knob backfilled Claude Code and Codex fully and left OpenCode
+ * still capped at a week: 4 of 19 sessions, with the other 15 emitting their
+ * parts but never a `session.started`.
+ */
+const DEFAULT_BACKFILL_DAYS = 7;
 /** Bounds one poll so a cold start drains over several cycles instead of one huge batch. */
 const SESSION_LIMIT = 200;
 const PART_LIMIT = 1000;
 
-const CURSOR_SESSION_CREATED = 'opencode:cursor:session_created';
 const CURSOR_SESSION_UPDATED = 'opencode:cursor:session_updated';
 const CURSOR_PART_UPDATED = 'opencode:cursor:part_updated';
+/**
+ * `opencode:started:<session id>` = '1' once session.started went out. Sessions
+ * are fetched by time_updated, so a cursor on time_created missed every session
+ * that was created before one already seen and touched later — i.e. every
+ * resumed session.
+ */
+const STARTED_PREFIX = 'opencode:started:';
+/** How long a detect() may reuse the version it last read from the database. */
+const VERSION_TTL_MS = 60_000;
 
 interface SessionRow {
   id: string;
@@ -119,7 +139,14 @@ interface PartRow {
 export class OpenCodeAdapter implements AgentAdapter {
   readonly id = 'opencode';
 
-  constructor(private readonly dataDir: string = OPENCODE_DATA_DIR) {}
+  /** The one read-only handle, opened lazily; statements are prepared once per handle. */
+  private conn?: { path: string; db: Database.Database; statements: Map<string, Database.Statement> };
+  private version?: { readAt: number; value: string | undefined };
+
+  constructor(
+    private readonly dataDir: string = OPENCODE_DATA_DIR,
+    private readonly backfillDays: number = DEFAULT_BACKFILL_DAYS,
+  ) {}
 
   async detect(): Promise<DetectionResult> {
     const db = resolveDbPath(this.dataDir);
@@ -160,7 +187,7 @@ export class OpenCodeAdapter implements AgentAdapter {
 
   async poll(ctx: PollContext): Promise<NormalizedEvent[]> {
     if (!resolveDbPath(this.dataDir)) return [];
-    const floor = Date.now() - BACKFILL_DAYS * 86_400_000;
+    const floor = Date.now() - this.backfillDays * 86_400_000;
     const cursor = (key: string): number => {
       const stored = Number(ctx.getMeta(key));
       return Number.isFinite(stored) && stored > 0 ? stored : floor;
@@ -168,7 +195,6 @@ export class OpenCodeAdapter implements AgentAdapter {
 
     const events: NormalizedEvent[] = [];
     const sessionUpdated = cursor(CURSOR_SESSION_UPDATED);
-    const sessionCreated = cursor(CURSOR_SESSION_CREATED);
     const partUpdated = cursor(CURSOR_PART_UPDATED);
 
     const sessions = this.query<SessionRow>(
@@ -183,13 +209,11 @@ export class OpenCodeAdapter implements AgentAdapter {
       SESSION_LIMIT,
     );
 
-    const sessionAccounts = readOpenCodeAccounts(this.dataDir);
+    const accounts = readOpenCodeAccounts(this.dataDir);
     let maxUpdated = sessionUpdated;
-    let maxCreated = sessionCreated;
     for (const row of sessions) {
-      events.push(...this.sessionEvents(row, sessionCreated, sessionAccounts));
+      events.push(...this.sessionEvents(row, ctx, accounts));
       maxUpdated = Math.max(maxUpdated, row.time_updated);
-      maxCreated = Math.max(maxCreated, row.time_created);
     }
 
     const parts = this.query<PartRow>(
@@ -206,28 +230,27 @@ export class OpenCodeAdapter implements AgentAdapter {
     );
 
     let maxPart = partUpdated;
-    const accounts = readOpenCodeAccounts(this.dataDir);
     for (const row of parts) {
       events.push(...this.partEvents(row, accounts));
       maxPart = Math.max(maxPart, row.time_updated);
     }
 
     ctx.setMeta(CURSOR_SESSION_UPDATED, String(maxUpdated));
-    ctx.setMeta(CURSOR_SESSION_CREATED, String(maxCreated));
     ctx.setMeta(CURSOR_PART_UPDATED, String(maxPart));
     return events;
   }
 
   private sessionEvents(
     row: SessionRow,
-    createdCursor: number,
+    ctx: PollContext,
     accounts: Map<string, AccountIdentity>,
   ): NormalizedEvent[] {
     const { model, provider } = parseModel(row.model);
     const wrap = wrapper(row.id, row.version ?? undefined, row.directory, account(accounts, provider));
     const events: NormalizedEvent[] = [];
 
-    if (row.time_created > createdCursor) {
+    if (ctx.getMeta(STARTED_PREFIX + row.id) === null) {
+      ctx.setMeta(STARTED_PREFIX + row.id, '1');
       events.push(
         wrap(row.time_created, 'session.started', {
           external_session_id: row.id,
@@ -267,7 +290,11 @@ export class OpenCodeAdapter implements AgentAdapter {
     if (endedAt) {
       events.push(
         wrap(endedAt, 'session.ended', {
-          reason: row.time_archived ? 'archived' : 'compacted',
+          external_session_id: row.id,
+          // The server's `reason` enum is normal|timeout|crash|unknown; what
+          // OpenCode actually did rides alongside as an extra key.
+          reason: 'normal',
+          end_kind: row.time_archived ? 'archived' : 'compacted',
         }),
       );
     }
@@ -305,37 +332,68 @@ export class OpenCodeAdapter implements AgentAdapter {
     return [];
   }
 
-  /** Newest session's `version` column — OpenCode stamps its own version on every row. */
+  /**
+   * Newest session's `version` column — OpenCode stamps its own version on
+   * every row. detect() runs every scan cycle; the value changes on upgrade,
+   * so a minute-old reading is plenty.
+   */
   private latestVersion(): string | undefined {
+    if (this.version && Date.now() - this.version.readAt < VERSION_TTL_MS) return this.version.value;
+    let value: string | undefined;
     try {
-      return (
+      value =
         this.query<{ version: string | null }>(
           'SELECT version FROM session ORDER BY time_updated DESC LIMIT 1',
-        )[0]?.version ?? undefined
-      );
+        )[0]?.version ?? undefined;
     } catch {
-      return undefined; // absent beats fabricated
+      value = undefined; // absent beats fabricated
     }
+    this.version = { readAt: Date.now(), value };
+    return value;
   }
 
   /**
-   * One short read-only query, then the handle is closed.
+   * One short read-only query on the shared handle.
    *
    * readonly + fileMustExist means a bug here cannot write, migrate or create
    * anything; busy_timeout means a concurrent OpenCode write makes us wait
    * briefly instead of failing, and query_only is the belt to that suspenders.
+   * The handle is dropped on any error or when the database path changes, so
+   * a rotated or replaced file is picked up on the next call.
    */
   private query<T>(sql: string, ...params: (string | number)[]): T[] {
     const path = resolveDbPath(this.dataDir);
-    if (!path) return [];
-    const db = new Database(path, { readonly: true, fileMustExist: true });
-    try {
-      db.pragma('busy_timeout = 3000');
-      db.pragma('query_only = 1');
-      return db.prepare(sql).all(...params) as T[];
-    } finally {
-      db.close();
+    if (!path) {
+      this.disconnect();
+      return [];
     }
+    if (this.conn && this.conn.path !== path) this.disconnect();
+    try {
+      if (!this.conn) {
+        const db = new Database(path, { readonly: true, fileMustExist: true });
+        db.pragma('busy_timeout = 3000');
+        db.pragma('query_only = 1');
+        this.conn = { path, db, statements: new Map() };
+      }
+      let statement = this.conn.statements.get(sql);
+      if (!statement) {
+        statement = this.conn.db.prepare(sql);
+        this.conn.statements.set(sql, statement);
+      }
+      return statement.all(...params) as T[];
+    } catch (error) {
+      this.disconnect();
+      throw error;
+    }
+  }
+
+  private disconnect(): void {
+    try {
+      this.conn?.db.close();
+    } catch {
+      // Already closed or never opened; nothing to release.
+    }
+    this.conn = undefined;
   }
 }
 

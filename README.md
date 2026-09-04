@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/@agentstrack/collector.svg)](https://www.npmjs.com/package/@agentstrack/collector)
 [![CI](https://github.com/agentstrack/collector/actions/workflows/ci.yml/badge.svg)](https://github.com/agentstrack/collector/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 
 `@agentstrack/collector` turns the records Claude Code, Codex and OpenCode already keep on your
 machine into a normalized event stream:
@@ -30,7 +30,7 @@ before anything is: [Verify it yourself](#verify-it-yourself).
 ## Quick start
 
 ```bash
-npm install -g @agentstrack/collector       # requires Node >= 24
+npm install -g @agentstrack/collector       # requires Node >= 22
 
 agentstrack login at_live_xxxxxxxx_xxxxxxxx  # key from Settings → API keys
 agentstrack start                            # installs a login service and starts collecting
@@ -86,7 +86,7 @@ Nothing showing up? Run `agentstrack doctor`.
 | File paths, **relative to the project root by default** | Send absolute paths — which leak your username and your clients' names — unless you opt in |
 | Lines added/removed per edit, computed locally from the tool input | Send the lines themselves |
 | Git branch, commit SHA, additions/deletions/files changed | Send your git remote URL (only a SHA-256 of it) or commit messages and diffs |
-| Locally generated session titles (`analytics` mode and above) | Send the prompt those titles were derived from |
+| A session title — the first line of the prompt, capped at 120 chars and secret-redacted (`analytics` mode and above) | Send the rest of the prompt those titles were taken from |
 | Your hostname, OS, arch and each detected agent's version — **once, at registration** | Store the raw hostname server-side (it is kept only as a SHA-256) |
 | | Install hooks or modify `~/.claude/settings.json` / `~/.codex/hooks.json` |
 | | Send `organization_id` or `user_id` — they are not in the wire format at all |
@@ -198,8 +198,20 @@ collector keeps parsing and keeps spooling; when the network returns it drains o
 over 1 KB are gzipped.
 
 **Restart is safe.** File read offsets live in the same SQLite database as the queue, keyed by
-`(path, inode)`. A restart resumes mid-file. If a file is replaced (new inode) or truncated (offset
-past the end), it is re-read from the start rather than silently skipped.
+`(path, inode)`, and a chunk's offset is committed in the **same transaction** as the events parsed
+from it — a crash or a full disk between "read" and "queued" re-reads those lines rather than losing
+them. A restart resumes mid-file. If a file is replaced (new inode) or truncated (offset past the
+end), it is re-read from the start rather than silently skipped. Re-reading never double-counts:
+every event's `event_id` is derived from the file, the line's byte offset and the line's content, so
+the server's dedupe absorbs a replay. A Claude Code `model.response` is keyed on its `message.id`
+instead, since one response spans several lines; an idle `session.ended` on the agent, session and
+last-activity time. Only events with no source line (`git.commit`, database-backed agents) get a
+random id.
+
+**Big files are streamed, not slurped.** Transcripts are read in 4 MB chunks with the partial line
+carried across the boundary, at most 64 MB per file per scan so a first import keeps yielding to the
+upload loop. A single line over 8 MB is skipped to the next newline and counted in the log — never
+buffered, never logged. One unreadable file is logged and skipped; it cannot stall the other files.
 
 **A line the agent is still writing is never consumed.** The tailer advances its checkpoint only as
 far as the **last complete newline**; a partial trailing line is left unread and picked up whole on
@@ -209,9 +221,18 @@ so both halves would fail to parse and that event would be lost. Byte offsets ar
 raw buffer, not from decoded text, so a multi-byte character cannot desynchronise the position
 either.
 
-**Backpressure is handled.** A `413` halves the batch size and the collector recovers it on the next
-success. A `5xx`, a timeout, a `408` or a `429` is retried with jittered exponential backoff (1s
-base, capped at 5 minutes). A `4xx` that is none of those means the server will never accept the
+**Backpressure is handled, once per wave.** Batches go out `upload.concurrency` at a time, and the
+failure policy runs on the wave's collected outcomes rather than inside each request — so four
+failing siblings cost one backoff step, not four, and a sibling's success cannot undo a `413`
+shrink. A `413` halves the batch size once (never above the server's `max_batch_events`) and it
+creeps back up on success. A `5xx`, a timeout, a `408` or a `429` sets the next upload time with
+jittered exponential backoff (1s base, capped at 5 minutes, or the server's `Retry-After` if longer)
+— the daemon never sleeps on it, so tailing continues meanwhile. A daemon tick sends at most five
+waves before scanning again. Three responses **pause** uploads instead: a `401`/`403` (the key, not
+the events, is the problem), a `200` whose `quota.exceeded` says the org is over its monthly cap,
+and a `200` that rejects every event as malformed (the collector is probably older than the server).
+Nothing is acked or dropped while paused; `agentstrack status` shows the reason, and the pause lifts
+by itself once a wave succeeds. A `4xx` that is none of those means the server will never accept the
 batch: **the attempt counter is incremented for the events in that batch only, and one of them is
 deleted once it reaches `upload.max_retries` (default 8)**. It is not parked and it does not come
 back — a poison event must not be able to block the queue forever.
@@ -291,8 +312,10 @@ A match is replaced in place, and most rules substitute `[REDACTED:rule_name]`. 
 `bearer_header` → `Bearer [REDACTED]` and `basic_auth_url` → `scheme://[REDACTED]@host` keep the
 surrounding syntax so the shape of the command survives, `env_assignment` → `NAME=[REDACTED]` keeps
 the variable name, and `generic_hex_secret` substitutes the shorter `[REDACTED:hex]`. Your
-organization can add patterns server-side; a malformed org pattern is skipped rather than breaking
-the collector.
+organization can add patterns server-side; an org pattern that is malformed, longer than 256
+characters, or using a backreference is skipped, the common catastrophic nested-quantifier shapes
+(`(a+)+`, `(a|aa)+`, `((a+)b)+`) are rejected — a heuristic, not a proof — and org patterns are
+matched against at most the first 64 KB of any value.
 
 Redaction is defence in depth, not the primary control. The primary control is that in `metadata`
 and `analytics` modes the content is **deleted locally** and never enters the pipeline at all.
@@ -345,8 +368,11 @@ events at all** — not even counts. Edit the YAML and restart the collector.
 agentstrack login <api-key> [--api-url <url>] [--label <name>]
 ```
 
-The key is a **positional argument** — there is no interactive prompt and no environment variable.
-`--api-url` points at a self-hosted instance; `--label` names this machine in the dashboard.
+The key argument is **optional**. Passing it on the command line leaves it in your shell history and
+in `ps`, so `login` also reads `AGENTSTRACK_API_KEY`, or prompts on the terminal (echo off), or takes
+the key on stdin — `agentstrack login < key.txt`. `--api-url` points at a self-hosted instance and
+**must be `https`** (plain `http` is accepted only for `localhost`); `login` prints the URL it is
+about to use. `--label` names this machine in the dashboard.
 Registration is idempotent on (user, hostname hash), so re-running `login` on the same machine reuses
 the existing collector instead of fragmenting its history. The config file is written mode `600`, in
 a directory created mode `700`.
@@ -372,8 +398,11 @@ If your local privacy mode is stricter than the org's, login says so and keeps y
 
 `agentstrack start` writes a **launchd** agent on macOS (`~/Library/LaunchAgents/ai.agentstrack.collector.plist`)
 or a **systemd user unit** on Linux (`~/.config/systemd/user/agentstrack.service`), loads it, and
-returns. Neither needs root. `-f` / `--foreground` runs in the terminal instead — best for a first
-run, and the only mode where `status` reports `Running: yes`.
+returns. Neither needs root. The unit restarts the collector only on a **crash**, not after a clean
+exit — after `logout` the collector exits cleanly and the supervisor leaves it stopped instead of
+respawning it every few seconds (launchd `KeepAlive`/`SuccessfulExit`, systemd `Restart=on-failure`
+with a 5-in-5-minutes start limit). `-f` / `--foreground` runs in the terminal instead — best for a
+first run, and the only mode where `status` reports `Running: yes`.
 
 `agentstrack stop` removes the service unit *and* signals a foreground collector. There is no
 "stop but keep the unit"; use `agentstrack service install` to put it back.
@@ -389,9 +418,9 @@ Configuration
 
 Agents
   ✓ claude_code transcripts found
-    225 file(s) modified in the last 7 days
+    225 file(s) modified in the last 7 days   # window is tracking.max_age_days (default 7)
   ✓ codex transcripts found
-    3 file(s) modified in the last 7 days
+    3 file(s) modified in the last 7 days     # window is tracking.max_age_days (default 7)
 
 Connectivity
   ✗ API reachable at https://api.agentstrack.ai
@@ -678,8 +707,10 @@ gzipped (`content-encoding: gzip`).
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `401` in the log | Key revoked or wrong | `agentstrack login <new-key>` |
-| `403` | Key lacks ingest permission | Issue a new key |
+| `Uploads paused (auth)` — `401` | Key revoked or wrong | `agentstrack login <new-key>`; nothing was dropped |
+| `Uploads paused (auth)` — `403` | Key lacks ingest permission | Issue a new key; nothing was dropped |
+| `Uploads paused (quota)` | Org over its monthly event cap | Events stay spooled and resume when the cap resets or the plan changes |
+| `Uploads paused (schema)` | Server rejects every event — collector older than the API | Upgrade the collector; nothing was dropped |
 | `fetch failed`, `ETIMEDOUT` | Network, VPN or proxy | Set `HTTPS_PROXY`; events keep spooling meanwhile |
 | `Server rejected the batch as too large` | Batch above the server's limit | Automatic — batch size halves and recovers |
 | `Batch permanently rejected: … (dropped N)` | Non-retryable `4xx` | N events **in that batch** hit `max_retries` and were deleted. Nothing outside the batch is touched. Check the API version matches the collector's schema. |
@@ -720,7 +751,8 @@ grep -i "error\|failed\|rejected" ~/.agentstrack/collector.log | tail -20
 ```
 
 The log records counts, queue depths and `event_id`s — never payloads, prompts, code or keys. That is
-what makes it safe to attach to an issue. Please attach `agentstrack doctor --json` too.
+what makes it safe to attach to an issue. It rotates once at 5 MB to `collector.log.1`; a scan pass
+writes one `Queued N events across M files` line, not one per file. Please attach `agentstrack doctor --json` too.
 
 ### Complete reset
 
@@ -739,15 +771,14 @@ Honest list of things that are **not** in 0.1.0, so you do not go looking for th
 [ROADMAP.md](./ROADMAP.md) has the same list with the design constraints and what "help wanted"
 means for each.
 
-- **Backfill window control** (`sync --since 30d`). Today the daemon reads whatever was modified in the last 7 days, and that window is not configurable.
+- **Backfill window control** (`sync --since 30d`). Today the window is `tracking.max_age_days` (default 7) for every run; there is no per-invocation override.
 - **`config get` / `config set` / `config edit`** — edit the YAML by hand for now.
 - **`--verbose` logging** and per-run agent selection (`start --agent codex`); use `tracking.agents`.
-- **Local time accounting.** Human-active / agent-active / idle windows are derived server-side from the event stream; `tracking.idle_timeout_seconds` is parsed by the collector but not used by it.
+- **Local time accounting.** Human-active / agent-active / idle windows are derived server-side from the event stream; the collector uses `tracking.idle_timeout_seconds` only to decide when a quiet session has ended.
 - **Process metrics.** `tracking.process_metrics` is accepted and ignored.
-- **`session.ended`, `heartbeat`, `model.request` and `git.branch_changed`** are in the schema but no adapter emits them yet.
+- **`heartbeat`, `model.request` and `git.branch_changed`** are in the schema but no adapter emits them yet. `session.ended` is not read from any Claude Code or Codex transcript either — the daemon emits it after `tracking.idle_timeout_seconds` of quiet (`reason: timeout`) or on shutdown (`reason: unknown`).
 - **Local task classification** (`task_category`) — the field exists in the schema; the collector only derives a title.
-- **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 24+ does.
-- **Content-derived `event_id`.** Ids are random per enqueue, so retrying a batch is safe but re-reading a truncated transcript would create duplicates.
+- **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 22+ does.
 - **`MultiEdit`.** The Claude Code adapter derives file changes from `Edit`, `Write`, `NotebookEdit` and `Read`; a `MultiEdit` call is still recorded as `tool.started`/`tool.completed`, but produces no `file.changed` events and no line counts.
 
 ---

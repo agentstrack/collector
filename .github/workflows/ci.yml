@@ -21,11 +21,10 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        # The package declares engines.node >= 24. better-sqlite3 13 is what
-        # forced that floor — its v13 line is >=22 and the v12 line was the last
-        # to support 20 — and holding an EOL runtime back a native dependency is
-        # not a trade worth making.
-        node: [24]
+        # The package declares engines.node >= 22 — the floor better-sqlite3 13
+        # sets (its v13 line is >=22; v12 was the last to support 20). Test both
+        # the floor and current so the declared range is actually exercised.
+        node: [22, 24]
 
     steps:
       - uses: actions/checkout@v4

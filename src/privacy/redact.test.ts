@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BUILTIN_RULES, commandName, compileRules, redact } from './redact.js';
+import { BUILTIN_RULES, ORG_SUBJECT_CAP, commandName, compileRules, redact } from './redact.js';
 
 describe('secret redaction', () => {
   it('redacts real-shaped provider credentials', () => {
@@ -73,6 +73,28 @@ describe('compileRules', () => {
     ]);
     expect(rules).toHaveLength(1);
     expect(redact('see INTERNAL-4321', rules).text).toBe('see [TICKET]');
+  });
+
+  it('rejects a catastrophic-backtracking org rule but keeps a valid sibling', () => {
+    const rules = compileRules([
+      { pattern: '(a+)+$', replacement: 'x' }, // nested quantifier — rejected
+      { pattern: 'INTERNAL-\\d+', replacement: '[TICKET]' },
+      { pattern: '(a{1,})+', replacement: 'x' }, // interval inside a quantified group
+      { pattern: '(a|aa)+b', replacement: 'x' }, // overlapping alternation
+      { pattern: '((a+)b)+', replacement: 'x' }, // quantifier one group deeper
+    ]);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.name).toBe('org_rule_1');
+    expect(redact('see INTERNAL-99', rules).text).toBe('see [TICKET]');
+  });
+
+  it('caps the subject an org rule sees so it cannot scan an unbounded input', () => {
+    // A rule anchored past the cap must not match content beyond it.
+    const rules = compileRules([{ pattern: 'NEEDLE', replacement: '[X]' }]);
+    const hidden = 'a'.repeat(ORG_SUBJECT_CAP) + 'NEEDLE';
+    expect(redact(hidden, rules).text).toContain('NEEDLE');
+    // Within the cap it still fires.
+    expect(redact('NEEDLE here', rules).text).toBe('[X] here');
   });
 });
 

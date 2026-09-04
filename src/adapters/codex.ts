@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent } from './types.js';
-import { num, safeJsonParse, str } from './types.js';
+import { newestJsonl, num, readHeadLines, safeJsonParse, str } from './types.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
 
@@ -17,11 +17,18 @@ import { deriveTitle } from '../sessions/title.js';
  *   {"type":"turn_context","payload":{"turn_id":"…","model":"gpt-5.4","effort":"high"}}
  *   {"type":"event_msg","payload":{"type":"token_count","info":{
  *      "total_token_usage":{…},"last_token_usage":{…}},"rate_limits":{"plan_type":"plus"}}}
- *   {"type":"response_item","payload":{"type":"function_call","name":"shell",…}}
+ *   {"type":"response_item","payload":{"type":"function_call","name":"exec_command",…}}
+ *   {"type":"event_msg","payload":{"type":"exec_command_end","call_id":"…",
+ *    "command":["/bin/zsh","-lc","…"],"exit_code":0,"duration":{"secs":1,"nanos":5e8},"status":"completed"}}
+ *   {"type":"response_item","payload":{"type":"function_call_output","call_id":"…","output":"…"}}
  *
  * The important subtlety: token_count reports RUNNING TOTALS. These are emitted
  * as cumulative snapshots so the server treats them as a gauge, not a counter —
  * summing them would multiply a session's tokens by the number of snapshots.
+ * Per-turn deltas from `last_token_usage` were checked against real rollouts
+ * and do NOT reconcile to the final total (duplicate snapshots, resets), so the
+ * gauge stays; the price is that a mid-session model switch reports the whole
+ * total under both models (see docs/EVENT_SCHEMA.md).
  */
 export const CODEX_DIR = process.env['CODEX_HOME'] ?? join(homedir(), '.codex');
 const SESSIONS_DIR = join(CODEX_DIR, 'sessions');
@@ -30,7 +37,7 @@ export class CodexAdapter implements AgentAdapter {
   readonly id = 'codex';
 
   /** Session id and model carry across lines within one rollout file. */
-  private readonly fileState = new Map<string, { sessionId?: string; model?: string; version?: string; cwd?: string }>();
+  private readonly fileState = new Map<string, FileState>();
 
   async detect(): Promise<DetectionResult> {
     if (!existsSync(SESSIONS_DIR)) {
@@ -72,13 +79,20 @@ export class CodexAdapter implements AgentAdapter {
     const occurredAt = str(raw['timestamp']);
     if (!type || !occurredAt) return [];
 
-    const state = this.fileState.get(ctx.sourceFile) ?? {};
+    let state = this.fileState.get(ctx.sourceFile);
+    if (!state) {
+      // A daemon restart resumes mid-file, after session_meta was consumed.
+      // The rollout is named rollout-<ts>-<uuid>.jsonl and that uuid IS the
+      // session id (13/13 real files), so seed it from the name; model and
+      // cwd come back with the next turn_context.
+      state = { sessionId: /([0-9a-f-]{36})\.jsonl$/i.exec(ctx.sourceFile)?.[1], calls: new Map() };
+      this.fileState.set(ctx.sourceFile, state);
+    }
 
     if (type === 'session_meta') {
-      state.sessionId = str(payload['id']);
+      state.sessionId = str(payload['id']) ?? state.sessionId;
       state.version = str(payload['cli_version']);
       state.cwd = str(payload['cwd']);
-      this.fileState.set(ctx.sourceFile, state);
       if (!state.sessionId) return [];
       return [
         this.wrap(state, occurredAt, 'session.started', {
@@ -91,7 +105,7 @@ export class CodexAdapter implements AgentAdapter {
 
     if (type === 'turn_context') {
       state.model = str(payload['model']) ?? state.model;
-      this.fileState.set(ctx.sourceFile, state);
+      state.cwd ??= str(payload['cwd']);
       if (!state.sessionId || !state.model) return [];
       return [
         this.wrap(state, occurredAt, 'agent.turn.started', {
@@ -143,11 +157,27 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     if (kind === 'exec_command_end') {
+      // The real shape: argv list, {secs,nanos} duration, numeric exit_code.
+      // This is also where an exec_command call terminates — its
+      // function_call_output is a bare string with no exit status.
+      const callId = str(payload['call_id']);
+      const exitCode = num(payload['exit_code']);
+      const duration = (payload['duration'] ?? {}) as Record<string, unknown>;
+      const durationMs = num(duration['secs']) * 1000 + Math.round(num(duration['nanos']) / 1e6);
+      const failed = exitCode !== 0 || str(payload['status']) === 'failed';
+      // The entry stays in `calls`: the function_call_output that must be
+      // ignored below may still be on its way.
+      const toolName = (callId && state.calls.get(callId)) ?? 'exec_command';
       return [
+        this.wrap(state, occurredAt, failed ? 'tool.failed' : 'tool.completed', {
+          tool_name: toolName,
+          tool_call_id: callId,
+          duration_ms: durationMs,
+        }),
         this.wrap(state, occurredAt, 'command.executed', {
-          command: str(payload['command']) ?? 'shell',
-          exit_code: num(payload['exit_code']),
-          duration_ms: num(payload['duration_ms']),
+          command: joinCommand(payload['command']) ?? str(payload['command']) ?? 'shell',
+          exit_code: exitCode,
+          duration_ms: durationMs,
         }),
       ];
     }
@@ -178,10 +208,13 @@ export class CodexAdapter implements AgentAdapter {
     // Recent Codex builds report the same tool calls as `custom_tool_call`
     // (apply_patch and the JS `exec` tool both arrive that way).
     if (kind === 'function_call' || kind === 'custom_tool_call') {
+      const toolName = str(payload['name']) ?? 'unknown';
+      const callId = str(payload['call_id']);
+      if (callId) state.calls.set(callId, toolName);
       const events = [
         this.wrap(state, occurredAt, 'tool.started', {
-          tool_name: str(payload['name']) ?? 'unknown',
-          tool_call_id: str(payload['call_id']),
+          tool_name: toolName,
+          tool_call_id: callId,
         }),
       ];
       for (const file of fileTouches(payload)) {
@@ -192,12 +225,20 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     if (kind === 'function_call_output' || kind === 'custom_tool_call_output') {
-      const output = (payload['output'] ?? {}) as Record<string, unknown>;
-      const failed = output['success'] === false || num(output['exit_code']) !== 0;
+      const callId = str(payload['call_id']);
+      const toolName = (callId && state.calls.get(callId)) ?? str(payload['name']) ?? 'unknown';
+      // exec_command terminates on its exec_command_end (which carries the exit
+      // status); the two arrive in either order, so key on the tool, not on order.
+      if (toolName === 'exec_command') return [];
+      if (callId) state.calls.delete(callId);
+      // `output` is a string (or a content list for custom tools), never an
+      // object. Only the shell_command tool prefixes it with the exit status.
+      const exitHeader = /^Exit code: (\d+)/.exec(str(payload['output']) ?? '');
+      const failed = exitHeader !== null && exitHeader[1] !== '0';
       return [
         this.wrap(state, occurredAt, failed ? 'tool.failed' : 'tool.completed', {
-          tool_name: str(payload['name']) ?? 'unknown',
-          tool_call_id: str(payload['call_id']),
+          tool_name: toolName,
+          tool_call_id: callId,
         }),
       ];
     }
@@ -235,12 +276,10 @@ interface FileState {
   model?: string;
   version?: string;
   cwd?: string;
+  /** call_id → tool name; `*_output` lines carry no name of their own. */
+  calls: Map<string, string>;
 }
 
-/**
- * Codex usage shape. reasoning_output_tokens is a SUBSET of output_tokens and
- * must not be added on top.
- */
 /** Newest rollout's `session_meta.cli_version`, if one can be found cheaply. */
 function readCliVersion(): string | undefined {
   try {
@@ -248,15 +287,14 @@ function readCliVersion(): string | undefined {
     for (const year of years.slice(0, 2)) {
       for (const month of readdirSync(join(SESSIONS_DIR, year)).sort().reverse()) {
         for (const day of readdirSync(join(SESSIONS_DIR, year, month)).sort().reverse()) {
-          const dir = join(SESSIONS_DIR, year, month, day);
-          for (const file of readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort().reverse()) {
-            // session_meta is the first line of a rollout, so a short read suffices.
-            for (const line of readFileSync(join(dir, file), 'utf8').split('\n', 5)) {
-              const parsed = safeJsonParse(line);
-              if (!parsed || str(parsed['type']) !== 'session_meta') continue;
-              const version = str((parsed['payload'] as Record<string, unknown> | undefined)?.['cli_version']);
-              if (version) return version;
-            }
+          const file = newestJsonl(join(SESSIONS_DIR, year, month, day));
+          if (!file) continue;
+          // session_meta is the first line of a rollout, so the head suffices.
+          for (const line of readHeadLines(file)) {
+            const parsed = safeJsonParse(line);
+            if (!parsed || str(parsed['type']) !== 'session_meta') continue;
+            const version = str((parsed['payload'] as Record<string, unknown> | undefined)?.['cli_version']);
+            if (version) return version;
           }
         }
       }
@@ -267,12 +305,20 @@ function readCliVersion(): string | undefined {
   return undefined;
 }
 
+/**
+ * Codex usage shape. reasoning_output_tokens is a SUBSET of output_tokens and
+ * must not be added on top. Likewise cached_input_tokens is a SUBSET of
+ * input_tokens (codex-rs: non_cached_input = input - cached), while the
+ * normalized shape keeps them exclusive the way Claude Code reports them —
+ * copying both verbatim billed every cached token twice.
+ */
 export function readCodexUsage(raw: unknown): TokenUsage {
   const usage = (raw ?? {}) as Record<string, unknown>;
+  const cached = num(usage['cached_input_tokens']);
   return {
     ...emptyUsage(),
-    input_tokens: num(usage['input_tokens']),
-    cached_input_tokens: num(usage['cached_input_tokens']),
+    input_tokens: Math.max(0, num(usage['input_tokens']) - cached),
+    cached_input_tokens: cached,
     output_tokens: num(usage['output_tokens']),
     reasoning_output_tokens: num(usage['reasoning_output_tokens']),
   };

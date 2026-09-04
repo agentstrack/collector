@@ -18,6 +18,8 @@ export interface PipelineContext {
   config: Config;
   projectRoot?: string;
   orgRules?: { pattern: string; replacement: string }[];
+  /** Pre-compiled org rules; preferred over `orgRules`, which is compiled per call. */
+  compiledRules?: RedactionRule[];
 }
 
 export interface PipelineResult {
@@ -31,7 +33,7 @@ const TEXT_KEYS = ['prompt_text', 'derived_title', 'message', 'command'] as cons
 export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): PipelineResult {
   const mode = ctx.config.privacy.mode;
   const policy = ctx.config.privacy;
-  const extraRules: RedactionRule[] = compileRules(ctx.orgRules ?? []);
+  const extraRules: RedactionRule[] = ctx.compiledRules ?? compileRules(ctx.orgRules ?? []);
   const redactions: string[] = [];
   const payload: Record<string, unknown> = { ...event.payload };
 

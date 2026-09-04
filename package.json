@@ -1,21 +1,44 @@
 {
   "name": "@agentstrack/collector",
-  "version": "0.1.0",
-  "description": "Privacy-first telemetry collector for AI coding agents — Claude Code, Codex, and more. Local-first, open source.",
+  "version": "0.2.1",
+  "description": "Privacy-first telemetry collector for AI coding agents \u2014 Claude Code, Codex, and more. Local-first, open source.",
   "license": "Apache-2.0",
   "type": "module",
-  "bin": { "agentstrack": "./dist/cli.js" },
+  "bin": {
+    "agentstrack": "./dist/cli.js"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE", "CHANGELOG.md"],
-  "engines": { "node": ">=24" },
-  "keywords": [
-    "claude-code", "codex", "ai-coding", "telemetry", "analytics", "developer-tools",
-    "observability", "token-usage", "ai-cost-tracking", "openai", "anthropic"
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
   ],
-  "repository": { "type": "git", "url": "git+https://github.com/agentstrack/collector.git" },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-coding",
+    "telemetry",
+    "analytics",
+    "developer-tools",
+    "observability",
+    "token-usage",
+    "ai-cost-tracking",
+    "openai",
+    "anthropic"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentstrack/collector.git"
+  },
   "homepage": "https://agentstrack.ai",
-  "bugs": { "url": "https://github.com/agentstrack/collector/issues" },
+  "bugs": {
+    "url": "https://github.com/agentstrack/collector/issues"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
     "dev": "tsc -p tsconfig.json --watch",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { applyPrivacy } from './pipeline.js';
+import { compileRules } from './redact.js';
 import { Config } from '../config.js';
 import { SCHEMA_VERSION, type EventEnvelope } from '../schema.js';
 
@@ -126,6 +127,17 @@ describe('privacy pipeline — BLUEPRINT §9.3', () => {
       orgRules: [{ pattern: 'INTERNAL-\\d+', replacement: '[TICKET]' }],
     });
     expect(out.payload['derived_title']).toBe('Work on [TICKET]');
+  });
+
+  it('prefers pre-compiled org rules over recompiling raw ones', () => {
+    const event = promptEvent();
+    event.payload['derived_title'] = 'Work on INTERNAL-9931';
+    const { event: out } = applyPrivacy(event, {
+      config: config('analytics'),
+      compiledRules: compileRules([{ pattern: 'INTERNAL-\\d+', replacement: '[COMPILED]' }]),
+      orgRules: [{ pattern: 'INTERNAL-\\d+', replacement: '[RAW]' }],
+    });
+    expect(out.payload['derived_title']).toBe('Work on [COMPILED]');
   });
 
   it('does not mutate the input event', () => {

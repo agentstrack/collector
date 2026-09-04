@@ -12,7 +12,17 @@ export interface RedactionRule {
   name: string;
   pattern: RegExp;
   replacement: string;
+  /**
+   * When true, the rule only ever sees the first {@link ORG_SUBJECT_CAP} bytes
+   * of the subject. Set on org-supplied rules so an untrusted pattern's
+   * worst-case backtracking is bounded by input length as well as by the
+   * complexity guard in {@link compileRules}.
+   */
+  capSubject?: boolean;
 }
+
+/** Org rules run on at most this many characters; built-ins see the whole value. */
+export const ORG_SUBJECT_CAP = 64 * 1024;
 
 export const BUILTIN_RULES: RedactionRule[] = [
   { name: 'anthropic_key', pattern: /sk-ant-[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:anthropic_key]' },
@@ -46,29 +56,57 @@ export function redact(input: string, extraRules: RedactionRule[] = []): Redacti
   const redactions: string[] = [];
 
   for (const rule of [...BUILTIN_RULES, ...extraRules]) {
+    // Org rules see only a bounded prefix; the untouched tail is re-appended.
+    const capped = rule.capSubject === true && text.length > ORG_SUBJECT_CAP;
+    const subject = capped ? text.slice(0, ORG_SUBJECT_CAP) : text;
     // Fresh lastIndex per call: these regexes are global and module-level, so
     // reusing them statefully across calls would skip matches.
     rule.pattern.lastIndex = 0;
-    if (!rule.pattern.test(text)) continue;
+    if (!rule.pattern.test(subject)) continue;
     rule.pattern.lastIndex = 0;
-    text = text.replace(rule.pattern, rule.replacement);
+    const replaced = subject.replace(rule.pattern, rule.replacement);
+    text = capped ? replaced + text.slice(ORG_SUBJECT_CAP) : replaced;
     redactions.push(rule.name);
   }
 
   return { text, redactions };
 }
 
-/** Compiles org-supplied patterns, skipping any that do not compile. */
+/**
+ * An org rule is rejected before compilation when its source is longer than
+ * this, contains a nested quantifier, or uses a backreference — all shapes that
+ * invite catastrophic backtracking on V8's engine, which runs single-threaded
+ * on the daemon and would hang the whole collector.
+ */
+const MAX_ORG_PATTERN_LENGTH = 256;
+// A quantified group whose body holds a quantifier, an alternation or an
+// interval — directly or in one nested group. A heuristic: it rejects the
+// common catastrophic shapes, not every regex that can blow up.
+const NESTED_QUANTIFIER =
+  /\((?:[^()]|\([^()]*\))*(?:[+*?|{]|\([^()]*[+*?|{][^()]*\))(?:[^()]|\([^()]*\))*\)[+*?{]/;
+const BACKREFERENCE = /\\[1-9]|\\k</;
+
+/** Compiles org-supplied patterns, skipping any unsafe or malformed rule. */
 export function compileRules(
   rules: { pattern: string; replacement: string }[],
 ): RedactionRule[] {
   const compiled: RedactionRule[] = [];
   for (const [index, rule] of rules.entries()) {
+    if (
+      rule.pattern.length > MAX_ORG_PATTERN_LENGTH ||
+      NESTED_QUANTIFIER.test(rule.pattern) ||
+      BACKREFERENCE.test(rule.pattern)
+    ) {
+      // Same policy as a malformed rule: log-and-skip rather than stop the
+      // collector. (Logging happens at the call site, which holds the logger.)
+      continue;
+    }
     try {
       compiled.push({
         name: `org_rule_${index}`,
         pattern: new RegExp(rule.pattern, 'g'),
         replacement: rule.replacement,
+        capSubject: true,
       });
     } catch {
       // A malformed server-side rule must not stop the collector entirely.

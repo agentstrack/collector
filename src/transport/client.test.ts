@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ApiError, backoffMs } from './client.js';
+import { ApiError, BatchResult, backoffMs, retryAfterMs } from './client.js';
 
 describe('backoffMs', () => {
   it('grows exponentially and stays within the cap', () => {
@@ -31,5 +31,24 @@ describe('ApiError', () => {
   it('marks server errors and throttling as retryable, client errors as not', () => {
     expect(new ApiError('x', 500, true).retryable).toBe(true);
     expect(new ApiError('x', 401, false).retryable).toBe(false);
+  });
+});
+
+describe('retryAfterMs', () => {
+  it('reads delta-seconds and HTTP dates, ignores garbage', () => {
+    expect(retryAfterMs('30')).toBe(30_000);
+    expect(retryAfterMs(new Date(Date.now() + 60_000).toUTCString())).toBeGreaterThan(50_000);
+    expect(retryAfterMs('soon')).toBeUndefined();
+    expect(retryAfterMs(null)).toBeUndefined();
+  });
+});
+
+describe('BatchResult', () => {
+  it('accepts the server shape with and without a quota block, rejects an error page', () => {
+    expect(BatchResult.safeParse({ accepted: 1, duplicates: 0, rejected: [] }).success).toBe(true);
+    expect(
+      BatchResult.safeParse({ accepted: 0, duplicates: 0, rejected: [], quota: { limit: null, used: null, exceeded: false } }).success,
+    ).toBe(true);
+    expect(BatchResult.safeParse({ error: 'Bad Gateway' }).success).toBe(false);
   });
 });

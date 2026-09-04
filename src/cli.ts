@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
 import pc from 'picocolors';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { hostname, platform, arch } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { stringify } from 'yaml';
 import {
   CONFIG_PATH, LOG_PATH, PID_PATH, SPOOL_PATH, loadConfig, saveConfig, Config, configExists,
@@ -25,19 +28,40 @@ program
 program
   .command('login')
   .description('Authenticate this device with an AgentsTrack API key')
-  .argument('<api-key>', 'API key from your dashboard (Settings → API keys)')
+  // Optional: an API key on the command line lands in shell history and `ps`.
+  // Prefer the AGENTSTRACK_API_KEY env var, or a stdin prompt / pipe.
+  .argument('[api-key]', 'API key from your dashboard (Settings → API keys)')
   .option('--api-url <url>', 'AgentsTrack API base URL (for self-hosted instances)')
   .option('--label <name>', 'friendly name for this device in the dashboard')
-  .action(async (apiKey: string, options: { apiUrl?: string; label?: string }) => {
-    const existing = configExists() ? loadConfig() : Config.parse({});
-    const config: Config = {
-      ...existing,
-      api_url: options.apiUrl ?? existing.api_url,
-      api_key: apiKey,
-      // A new key may belong to a different org, so re-register.
-      collector_id: undefined,
-    };
+  .action(async (apiKeyArg: string | undefined, options: { apiUrl?: string; label?: string }) => {
+    const apiKey = await resolveApiKey(apiKeyArg);
+    if (!apiKey) {
+      console.error(pc.red('✗') + ' No API key provided.');
+      console.error(pc.dim('  Pass it as an argument, set AGENTSTRACK_API_KEY, or pipe it on stdin.'));
+      process.exitCode = 1;
+      return;
+    }
 
+    const existing = configExists() ? loadConfig() : Config.parse({});
+    // Config.parse enforces the https-only rule (http allowed for localhost),
+    // so a bad --api-url is rejected here with a clear message rather than on
+    // the next start.
+    let config: Config;
+    try {
+      config = Config.parse({
+        ...existing,
+        api_url: options.apiUrl ?? existing.api_url,
+        api_key: apiKey,
+        // A new key may belong to a different org, so re-register.
+        collector_id: undefined,
+      });
+    } catch (error) {
+      console.error(pc.red('✗') + ` ${errorMessage(error)}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(pc.dim(`Connecting to ${config.api_url}…`));
     const client = new ApiClient({ apiUrl: config.api_url, apiKey });
     try {
       const adapters = buildAdapters(config);
@@ -89,6 +113,11 @@ program
       console.log('Not logged in.');
       return;
     }
+    // Clearing the key would leave a still-installed service restarting an
+    // unauthenticated collector, so tear it down first.
+    const unit = uninstallService();
+    if (unit) console.log(pc.dim(`  Removed service unit (${unit}).`));
+    if (existsSync(PID_PATH)) killCollector();
     const config = loadConfig();
     saveConfig({ ...config, api_key: undefined, collector_id: undefined });
 
@@ -113,10 +142,19 @@ program
   .description('Start collecting (installs a background service unless --foreground)')
   .option('-f, --foreground', 'run in this terminal instead of as a service')
   .action(async (options: { foreground?: boolean }) => {
-    const config = requireLogin();
+    // Exit 0 (not 1) when unauthenticated: the launchd/systemd unit runs
+    // `start --foreground`, and a non-zero exit makes the supervisor respawn it
+    // on a loop. A clean exit lets it idle until the user logs in again.
+    if (!configExists() || !loadConfig().api_key) {
+      const msg = 'Not logged in — collector idle. Run: agentstrack login';
+      console.log(pc.yellow('!') + ' ' + msg);
+      log(msg);
+      return;
+    }
+    const config = loadConfig();
 
     if (!options.foreground) {
-      const cliPath = new URL(import.meta.url).pathname;
+      const cliPath = fileURLToPath(import.meta.url);
       const target = installService(process.execPath, cliPath);
       console.log(pc.green('✓') + ` Collector service installed and started.`);
       console.log(`  Unit: ${pc.dim(target)}`);
@@ -125,7 +163,26 @@ program
       return;
     }
 
-    writeFileSync(PID_PATH, String(process.pid));
+    // Two collectors on one spool and one set of transcripts double-count and
+    // race the pid file, so refuse a second foreground start.
+    if (isRunning()) {
+      console.error(pc.red('✗') + ` Collector already running (pid ${readFileSync(PID_PATH, 'utf8').trim()}).`);
+      process.exit(1);
+    }
+    // A stale pid file (previous crash) is safe to clear now that isRunning()
+    // has confirmed no live process holds it; 'wx' then makes the create fail
+    // if a racing start beat us to it.
+    try {
+      unlinkSync(PID_PATH);
+    } catch {
+      // Nothing to remove.
+    }
+    try {
+      writeFileSync(PID_PATH, String(process.pid), { flag: 'wx' });
+    } catch {
+      console.error(pc.red('✗') + ' Another collector just started. Aborting.');
+      process.exit(1);
+    }
     const collector = new Collector(config);
 
     const shutdown = () => {
@@ -150,19 +207,7 @@ program
   .description('Stop the collector and remove its background service')
   .action(() => {
     const unit = uninstallService();
-    if (existsSync(PID_PATH)) {
-      const pid = Number(readFileSync(PID_PATH, 'utf8'));
-      try {
-        process.kill(pid, 'SIGTERM');
-      } catch {
-        // Process already exited.
-      }
-      try {
-        unlinkSync(PID_PATH);
-      } catch {
-        // Already gone.
-      }
-    }
+    if (existsSync(PID_PATH)) killCollector();
     console.log(pc.green('✓') + (unit ? ` Service removed (${unit}).` : ' Collector stopped.'));
   });
 
@@ -211,6 +256,9 @@ program
     const config = loadConfig();
     const spool = new Spool(SPOOL_PATH);
     const depth = spool.depth();
+    // Track F1 pauses uploads (e.g. over quota) by writing a reason here; show
+    // it so a growing queue does not look like an unexplained failure.
+    const pausedReason = spool.getMeta('upload_paused_reason');
     spool.close();
 
     console.log(pc.bold('AgentsTrack collector') + pc.dim(` v${VERSION}`));
@@ -219,6 +267,7 @@ program
     console.log(`  Collector:   ${config.collector_id ?? pc.dim('not registered')}`);
     console.log(`  Privacy:     ${pc.bold(config.privacy.mode)}`);
     console.log(`  Queue depth: ${depth === 0 ? pc.green('0') : pc.yellow(String(depth))}`);
+    if (pausedReason) console.log(`  Uploads:     ${pc.yellow('paused')} ${pc.dim(`(${pausedReason})`)}`);
     console.log(`  Service:     ${existsSync(servicePath()) ? pc.green('installed') : pc.dim('not installed')}`);
     console.log(`  Running:     ${isRunning() ? pc.green('yes') : pc.yellow('no')}`);
 
@@ -264,8 +313,9 @@ program
       check(detection.installed, `${adapter.id} sessions found`, detection.note);
       if (!detection.installed) continue;
       if (detection.watchPaths.length > 0) {
-        const files = detection.watchPaths.flatMap((p) => listTranscripts(p));
-        console.log(`    ${pc.dim(`${files.length} file(s) modified in the last 7 days`)}`);
+        const files = detection.watchPaths.flatMap((p) => listTranscripts(p, config.tracking.max_age_days));
+        const days = config.tracking.max_age_days;
+        console.log(`    ${pc.dim(`${files.length} file(s) modified in the last ${days} day${days === 1 ? '' : 's'}`)}`);
       } else {
         // A database-backed adapter has no files to count; name the source instead
         // of reporting a confident zero.
@@ -386,7 +436,7 @@ program
   .action((action: string) => {
     if (action === 'install') {
       requireLogin();
-      const cliPath = new URL(import.meta.url).pathname;
+      const cliPath = fileURLToPath(import.meta.url);
       console.log(pc.green('✓') + ` Installed: ${installService(process.execPath, cliPath)}`);
     } else if (action === 'uninstall') {
       const removed = uninstallService();
@@ -396,6 +446,45 @@ program
       process.exitCode = 1;
     }
   });
+
+/**
+ * Signals the foreground collector named by the pid file, but only after
+ * confirming the pid still belongs to a collector — a stale file may now point
+ * at an unrelated, recycled pid, which we must not kill.
+ */
+function killCollector(): void {
+  const pid = Number(readFileSync(PID_PATH, 'utf8').trim());
+  const removePid = () => {
+    try {
+      unlinkSync(PID_PATH);
+    } catch {
+      // Already gone.
+    }
+  };
+  if (!Number.isInteger(pid) || pid <= 0) {
+    removePid();
+    return;
+  }
+  let command = '';
+  try {
+    command = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  } catch {
+    // No such process — the pid file is stale.
+    removePid();
+    return;
+  }
+  if (!command.includes('agentstrack')) {
+    // The pid was recycled by an unrelated process; drop the stale file only.
+    removePid();
+    return;
+  }
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch {
+    // Process already exited.
+  }
+  removePid();
+}
 
 /** True when a foreground collector holds the pid file. */
 function isRunning(): boolean {
@@ -469,6 +558,41 @@ async function doctorJson(): Promise<boolean> {
   return (
     configured && Boolean(config?.api_key) && api.reachable && agents.some((a) => a.installed)
   );
+}
+
+/**
+ * Resolves the API key from, in order: the argument, AGENTSTRACK_API_KEY, or
+ * stdin (a pipe, or an echo-off prompt on a TTY). Keeps the key off the command
+ * line and out of shell history when the caller wants it to be.
+ */
+async function resolveApiKey(arg?: string): Promise<string> {
+  if (arg) return arg.trim();
+  const fromEnv = process.env['AGENTSTRACK_API_KEY'];
+  if (fromEnv) return fromEnv.trim();
+  if (!process.stdin.isTTY) {
+    // Piped: `agentstrack login < key.txt`.
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks).toString('utf8').trim();
+  }
+  return promptSecret('API key: ');
+}
+
+/** Reads one line from a TTY without echoing it. */
+function promptSecret(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    // Suppress echo of the typed characters; still let the prompt and newline through.
+    const muted = rl as unknown as { _writeToOutput?: (s: string) => void };
+    muted._writeToOutput = (s: string) => {
+      if (s.includes(prompt) || s.includes('\n') || s.includes('\r')) process.stdout.write(s);
+    };
+    rl.question(prompt, (answer) => {
+      rl.close();
+      process.stdout.write('\n');
+      resolve(answer.trim());
+    });
+  });
 }
 
 function requireLogin(): Config {

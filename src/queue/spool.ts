@@ -4,6 +4,12 @@ import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { EventEnvelope } from '../schema.js';
 
+export interface Checkpoint {
+  inode: string;
+  offset: number;
+  size: number;
+}
+
 /**
  * Durable local spool.
  *
@@ -17,22 +23,73 @@ import type { EventEnvelope } from '../schema.js';
  */
 export class Spool {
   private readonly db: Database.Database;
+  private readonly stmt: {
+    insert: Database.Statement;
+    peek: Database.Statement;
+    del: Database.Statement;
+    bump: Database.Statement;
+    drop: Database.Statement;
+    count: Database.Statement;
+    checkpoint: Database.Statement;
+    getMeta: Database.Statement;
+    setMeta: Database.Statement;
+    delMeta: Database.Statement;
+  };
+  /**
+   * Every checkpoint, in memory. A steady-state scan touches every tracked
+   * file every 5s and almost none of them changed; answering that from a Map
+   * costs nothing, and only a change is written through.
+   */
+  private readonly checkpoints = new Map<string, Checkpoint>();
 
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path);
-    // The spool holds un-uploaded telemetry; default umask makes it world-readable.
+    // WAL so a crash mid-write cannot corrupt the queue.
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = NORMAL');
+    // The WAL is otherwise only trimmed on close; a backfill leaves it at its
+    // high-water mark forever.
+    this.db.pragma('journal_size_limit = 8388608');
+    // The spool holds un-uploaded telemetry; default umask makes it
+    // world-readable. WAL and SHM exist only after the pragma above.
     for (const suffix of ['', '-wal', '-shm']) {
       try {
         chmodSync(`${path}${suffix}`, 0o600);
       } catch {
-        // WAL/SHM may not exist yet; the main db is the one that matters.
+        // The main db is the one that matters.
       }
     }
-    // WAL so a crash mid-write cannot corrupt the queue.
-    this.db.pragma('journal_mode = WAL');
-    this.db.pragma('synchronous = NORMAL');
     this.migrate();
+    this.vacuumIfBloated();
+
+    this.stmt = {
+      insert: this.db.prepare('INSERT OR IGNORE INTO events (event_id, body, created_at) VALUES (?, ?, ?)'),
+      peek: this.db.prepare('SELECT event_id, body FROM events ORDER BY created_at ASC, rowid ASC LIMIT ?'),
+      del: this.db.prepare('DELETE FROM events WHERE event_id = ?'),
+      bump: this.db.prepare('UPDATE events SET attempts = attempts + 1 WHERE event_id = ?'),
+      drop: this.db.prepare('DELETE FROM events WHERE event_id = ? AND attempts >= ?'),
+      count: this.db.prepare('SELECT COUNT(*) AS n FROM events'),
+      checkpoint: this.db.prepare(
+        `INSERT INTO checkpoints (path, inode, offset, size) VALUES (?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET inode = excluded.inode, offset = excluded.offset, size = excluded.size`,
+      ),
+      getMeta: this.db.prepare('SELECT value FROM meta WHERE key = ?'),
+      setMeta: this.db.prepare(
+        'INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      ),
+      delMeta: this.db.prepare('DELETE FROM meta WHERE key = ?'),
+    };
+
+    this.loadCheckpoints();
+  }
+
+  private loadCheckpoints(): void {
+    const rows = this.db.prepare('SELECT path, inode, offset, size FROM checkpoints').all() as (Checkpoint & {
+      path: string;
+    })[];
+    this.checkpoints.clear();
+    for (const { path: p, ...cp } of rows) this.checkpoints.set(p, cp);
   }
 
   private migrate() {
@@ -59,25 +116,49 @@ export class Spool {
     `);
   }
 
+  /**
+   * A drained backfill leaves the file at its high-water mark, nearly all of
+   * it free pages (a 206MB spool holding 78 events was observed). VACUUM once
+   * at open when the freelist is both large and the majority of the file —
+   * never on a small db, where it is pure cost.
+   */
+  private vacuumIfBloated() {
+    const free = Number(this.db.pragma('freelist_count', { simple: true }));
+    const pages = Number(this.db.pragma('page_count', { simple: true }));
+    if (free > 2048 && free > pages / 2) {
+      try {
+        this.db.exec('VACUUM');
+      } catch {
+        // Out of disk or a concurrent reader: the queue still works, just fat.
+      }
+    }
+  }
+
+  /** Runs `fn` atomically. A throw rolls back everything written inside it. */
+  transaction<T>(fn: () => T): T {
+    try {
+      return this.db.transaction(fn)();
+    } catch (error) {
+      // setCheckpoint() updated the cache before the rollback (or a failed
+      // COMMIT — SQLITE_FULL) undid the row; bring it back in line with disk.
+      this.loadCheckpoints();
+      throw error;
+    }
+  }
+
   enqueue(events: EventEnvelope[]): number {
     if (events.length === 0) return 0;
-    const stmt = this.db.prepare(
-      'INSERT OR IGNORE INTO events (event_id, body, created_at) VALUES (?, ?, ?)',
-    );
     const now = Date.now();
-    const insertAll = this.db.transaction((batch: EventEnvelope[]) => {
+    return this.transaction(() => {
       let written = 0;
-      for (const event of batch) written += stmt.run(event.event_id, JSON.stringify(event), now).changes;
+      for (const event of events) written += this.stmt.insert.run(event.event_id, JSON.stringify(event), now).changes;
       return written;
     });
-    return insertAll(events);
   }
 
   /** Oldest-first so a backlog drains in the order it happened. */
   peek(limit: number): { eventId: string; event: EventEnvelope }[] {
-    const rows = this.db
-      .prepare('SELECT event_id, body FROM events ORDER BY created_at ASC, rowid ASC LIMIT ?')
-      .all(limit) as { event_id: string; body: string }[];
+    const rows = this.stmt.peek.all(limit) as { event_id: string; body: string }[];
 
     return rows.flatMap((row) => {
       try {
@@ -92,8 +173,7 @@ export class Spool {
 
   ack(eventIds: string[]): void {
     if (eventIds.length === 0) return;
-    const stmt = this.db.prepare('DELETE FROM events WHERE event_id = ?');
-    this.db.transaction((ids: string[]) => ids.forEach((id) => stmt.run(id)))(eventIds);
+    this.transaction(() => eventIds.forEach((id) => this.stmt.del.run(id)));
   }
 
   /**
@@ -110,51 +190,41 @@ export class Spool {
     if (eventIds.length === 0) return 0;
     const limit = Math.max(1, maxAttempts);
 
-    const bump = this.db.prepare('UPDATE events SET attempts = attempts + 1 WHERE event_id = ?');
-    const drop = this.db.prepare('DELETE FROM events WHERE event_id = ? AND attempts >= ?');
-
-    return this.db.transaction((ids: string[]) => {
+    return this.transaction(() => {
       let dropped = 0;
-      for (const id of ids) {
-        bump.run(id);
-        dropped += drop.run(id, limit).changes;
+      for (const id of eventIds) {
+        this.stmt.bump.run(id);
+        dropped += this.stmt.drop.run(id, limit).changes;
       }
       return dropped;
-    })(eventIds);
+    });
   }
 
   depth(): number {
-    return (this.db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+    return (this.stmt.count.get() as { n: number }).n;
   }
 
-  getCheckpoint(path: string): { inode: string; offset: number; size: number } | null {
-    return (
-      (this.db.prepare('SELECT inode, offset, size FROM checkpoints WHERE path = ?').get(path) as
-        | { inode: string; offset: number; size: number }
-        | undefined) ?? null
-    );
+  getCheckpoint(path: string): Checkpoint | null {
+    return this.checkpoints.get(path) ?? null;
   }
 
   setCheckpoint(path: string, inode: string, offset: number, size: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO checkpoints (path, inode, offset, size) VALUES (?, ?, ?, ?)
-         ON CONFLICT(path) DO UPDATE SET inode = excluded.inode, offset = excluded.offset, size = excluded.size`,
-      )
-      .run(path, inode, offset, size);
+    const current = this.checkpoints.get(path);
+    if (current && current.inode === inode && current.offset === offset && current.size === size) return;
+    this.stmt.checkpoint.run(path, inode, offset, size);
+    this.checkpoints.set(path, { inode, offset, size });
   }
 
   getMeta(key: string): string | null {
-    return (
-      (this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as { value: string } | undefined)?.value ??
-      null
-    );
+    return (this.stmt.getMeta.get(key) as { value: string } | undefined)?.value ?? null;
   }
 
   setMeta(key: string, value: string): void {
-    this.db
-      .prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-      .run(key, value);
+    this.stmt.setMeta.run(key, value);
+  }
+
+  deleteMeta(key: string): void {
+    this.stmt.delMeta.run(key);
   }
 
   /** Stable per-install id, generated once. */
