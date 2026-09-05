@@ -56,8 +56,8 @@ Every event, from every adapter, has exactly this shape.
 | `event_type` | enum | ✅ | One of the 18 below. |
 | `payload` | object | ✅ | Defaults to `{}`. Shape depends on `event_type`. |
 
-Unknown payload keys are **stripped, not rejected** — a newer collector talking to an older server
-degrades rather than fails. A malformed event rejects that event only, never the whole batch: a
+Unknown payload keys are **kept, not rejected** — a newer collector talking to an older server
+degrades rather than fails, and an older server stores keys it does not yet read. A malformed event rejects that event only, never the whole batch: a
 collector that cannot drain its spool would lose a developer's whole day.
 
 ---
@@ -137,6 +137,21 @@ anything from a window when the daemon was down — carries **no** `account` at 
 today's account, which would be a plausible-looking lie. Live events, written while the collector
 was watching, carry one. Both files are re-read every scan cycle (cached on mtime), not once at boot.
 
+### Sub-agent stamp
+
+Claude Code writes each sub-agent to its own transcript,
+`<session-uuid>/subagents/[workflows/<wf>/]agent-<id>.jsonl`, with the **parent's** `sessionId` on
+every line. So a sub-agent's events land in the parent session — and every one of them carries this
+stamp, so the server can tell them apart and attribute the sub-agent's own `model.response` usage.
+Absent on every event from the main transcript.
+
+| Field | Type | Notes |
+|---|---|---|
+| `sidechain` | `true` | The line has `isSidechain: true` or comes from a `subagents/` file. |
+| `agent_id` | string | The transcript's `agentId` (also the `agent-<id>` in the file name). |
+| `agent_kind` | `subagent` \| `workflow` | `workflow` when the file sits under `subagents/workflows/`. |
+| `agent_type` | string | `agentType` from the sibling `agent-<id>.meta.json` — `general-purpose`, `workflow-subagent`, a custom agent name. Absent when the meta file is missing. |
+
 ### `RepoContext`
 
 | Field | Type | Notes |
@@ -196,6 +211,7 @@ The event where privacy mode is most visible.
 | `prompt_chars` | int ≥ 0 | all modes — a **count**, not the text |
 | `derived_title` | string (≤200) | `analytics`, `full` — the first meaningful line of the prompt, computed **on your machine** and truncated to 120 characters; the raw text is then deleted. Dropped in `analytics` under `privacy.prompts: never`, and in `metadata` by the mode itself. Not yet dropped by `never` under `mode: full` |
 | `task_category` | enum | schema only — not populated in 0.1.0 |
+| `ultracode` | `true` | all modes — present only when the prompt contains the whole word `ultracode` (case-insensitive). A boolean computed locally before redaction; the prompt is not uploaded to find it. |
 | `prompt_text` | string | **`full` mode with `privacy.prompts: full` only.** Redacted first; absent entirely otherwise. |
 | `account` | `Account` | all modes — but `label` and `org` only in `analytics` and `full`. See below. |
 
@@ -254,9 +270,19 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 | `tool_call_id` | string | ✅ | ✅ | ✅ |
 | `duration_ms` | int ≥ 0 | — | schema only | schema only |
 | `error_kind` | string | — | — | schema only |
+| `skill` | string | ✅ | ✅ | ✅ |
+| `subagent_type` | string | ✅ | ✅ | ✅ |
+| `description` | string | ✅ | ✅ | ✅ |
+| `workflow_name` | string | ✅ | ✅ | ✅ |
 
 Tool **input and output are never sent**, in any mode. `error_kind` is a classification, never the
-error text.
+error text. The last four are the exception that proves it, and name only *what* was invoked:
+a Claude Code `Skill` call carries `skill` (the skill name); `Agent` carries `subagent_type` and
+`description` (the agent's one-line label — redacted like a title and dropped in `metadata` mode;
+the `Agent` call's prompt is never copied out of the call — the sub-agent transcript's own opening
+prompt is a `user.prompted` like any other and follows `privacy.prompts`); `Workflow` carries `workflow_name`, the `name` from
+the script's `meta` header when it is a plain string literal (the script itself is never sent).
+The `completed` / `failed` event repeats them, because that is the one the server counts.
 
 ### Files and commands
 

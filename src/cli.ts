@@ -3,7 +3,8 @@ import { Command } from 'commander';
 import pc from 'picocolors';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { hostname, platform, arch } from 'node:os';
+import { platform, arch } from 'node:os';
+import { machineInfo } from './machine.js';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { stringify } from 'yaml';
@@ -69,10 +70,8 @@ program
         adapters.map(async (a) => ({ agent: a.id, version: (await a.detect()).version })),
       );
       const result = await client.registerCollector({
-        hostname: hostname(),
+        ...machineInfo(),
         label: options.label,
-        os: platform(),
-        arch: arch(),
         version: VERSION,
         privacy_mode: config.privacy.mode,
         agents,

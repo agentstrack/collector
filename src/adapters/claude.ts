@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { deterministicEventId } from '../queue/event-id.js';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +25,13 @@ import { deriveTitle } from '../sessions/title.js';
  * One API response is written as SEVERAL assistant lines — one per content
  * block (thinking, text, tool_use) — each repeating the same message.id and
  * the same usage. Usage is therefore billed once per message.id, not per line.
+ *
+ * Sub-agents (the Agent tool, and Workflow scripts) write their own transcript
+ * under <session-uuid>/subagents/[workflows/<wf>/]agent-<id>.jsonl, with the
+ * parent's sessionId on every line, isSidechain: true and an agentId. A sibling
+ * agent-<id>.meta.json carries {"agentType","description","toolUseId",…}. Every
+ * event from such a line is stamped sidechain/agent_id/agent_kind/agent_type
+ * so the server can attribute the sub-agent's own usage to it.
  */
 export const CLAUDE_DIR = process.env['CLAUDE_CONFIG_DIR'] ?? join(homedir(), '.claude');
 const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
@@ -39,9 +46,19 @@ const MARKUP_PROMPT = /^<(task-notification|local-command-stdout|command-message
 interface FileState {
   /** message.id of the last assistant line whose usage was emitted. */
   lastMessageId?: string;
-  /** tool_use id → tool name; tool_result blocks carry only the id. */
-  tools: Map<string, string>;
+  /** tool_use id → tool name and extras; tool_result blocks carry only the id. */
+  tools: Map<string, { name: string; extra: Record<string, unknown> }>;
+  /** Sub-agent identity of this file: undefined = not looked up yet, null = a main transcript. */
+  agent?: AgentStamp | null;
 }
+
+interface AgentStamp {
+  agent_id?: string;
+  agent_kind: 'subagent' | 'workflow';
+  agent_type?: string;
+}
+
+const ULTRACODE = /\bultracode\b/i;
 
 export class ClaudeCodeAdapter implements AgentAdapter {
   readonly id = 'claude_code';
@@ -116,16 +133,21 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       agent: 'claude_code' as const,
       agent_version: agentVersion,
     };
-    const wrap = (
-      event_type: NormalizedEvent['event']['event_type'],
-      payload: Record<string, unknown>,
-    ): NormalizedEvent => ({ event: { ...base, event_type, payload }, cwd, repo });
-
     let state = this.fileState.get(ctx.sourceFile);
     if (!state) {
       state = { tools: new Map() };
       this.fileState.set(ctx.sourceFile, state);
     }
+    state.agent ??= readAgentStamp(ctx.sourceFile);
+
+    // A sub-agent's line, whether in its own file or (older releases) inline.
+    const agent = state.agent ?? (raw['isSidechain'] === true ? { agent_kind: 'subagent' as const } : null);
+    const stamp = agent ? { sidechain: true, ...agent, agent_id: str(raw['agentId']) ?? agent.agent_id } : {};
+
+    const wrap = (
+      event_type: NormalizedEvent['event']['event_type'],
+      payload: Record<string, unknown>,
+    ): NormalizedEvent => ({ event: { ...base, event_type, payload: { ...payload, ...stamp } }, cwd, repo });
 
     if (type === 'user') return this.normalizeUser(raw, state, wrap);
     if (type === 'assistant') return this.normalizeAssistant(raw, state, wrap);
@@ -159,10 +181,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         if (b['type'] !== 'tool_result') continue;
         const id = str(b['tool_use_id']);
         const failed = b['is_error'] === true;
+        const started = id ? state.tools.get(id) : undefined;
         events.push(
           wrap(failed ? 'tool.failed' : 'tool.completed', {
-            tool_name: (id && state.tools.get(id)) ?? 'unknown',
+            tool_name: started?.name ?? 'unknown',
             tool_call_id: id,
+            ...started?.extra,
           }),
         );
         if (id) state.tools.delete(id);
@@ -182,6 +206,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         prompt_chars: text.length,
         prompt_text: text,
         derived_title: deriveTitle(text),
+        // A boolean computed here, before the privacy pipeline strips the
+        // text, so it survives metadata mode without the prompt travelling.
+        ...(ULTRACODE.test(text) ? { ultracode: true } : {}),
       }),
     ];
   }
@@ -224,11 +251,12 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         if (b['type'] !== 'tool_use') continue;
         const toolName = str(b['name']) ?? 'unknown';
         const toolId = str(b['id']);
-        if (toolId) state.tools.set(toolId, toolName);
-        events.push(wrap('tool.started', { tool_name: toolName, tool_call_id: toolId }));
+        const input = (b['input'] ?? {}) as Record<string, unknown>;
+        const extra = toolExtras(toolName, input);
+        if (toolId) state.tools.set(toolId, { name: toolName, extra });
+        events.push(wrap('tool.started', { tool_name: toolName, tool_call_id: toolId, ...extra }));
 
         // Bash invocations are the interesting ones for command analytics.
-        const input = (b['input'] ?? {}) as Record<string, unknown>;
         const command = str(input['command']);
         if (toolName === 'Bash' && command) {
           events.push(wrap('command.executed', { command }));
@@ -253,11 +281,51 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 }
 
 /**
- * Maps Claude Code's usage block onto the normalized shape.
- *
- * thinking_tokens sits under output_tokens_details and is a SUBSET of
- * output_tokens — it must not be added on top, or thinking gets billed twice.
+ * What a Skill, Agent or Workflow call invoked — the name only, never the
+ * prompt or the script body. Everything else has no extras.
  */
+function toolExtras(toolName: string, input: Record<string, unknown>): Record<string, unknown> {
+  const extra: Record<string, unknown> = {};
+  if (toolName === 'Skill') extra['skill'] = str(input['skill']);
+  if (toolName === 'Agent') {
+    extra['subagent_type'] = str(input['subagent_type']);
+    extra['description'] = str(input['description']);
+  }
+  if (toolName === 'Workflow') extra['workflow_name'] = workflowName(str(input['script']));
+  for (const key of Object.keys(extra)) if (extra[key] === undefined) delete extra[key];
+  return extra;
+}
+
+/** `name: '…'` out of the script's `export const meta = {…}` header. Absent when it is not that simple. */
+function workflowName(script: string | undefined): string | undefined {
+  // ponytail: a regex over the first 4 KB, not a parser — meta is by convention the first export.
+  const m = /\bname:\s*(['"`])([^'"`\r\n]{1,120})\1/.exec(script?.slice(0, 4096) ?? '');
+  return m?.[2];
+}
+
+/**
+ * Sub-agent identity of a transcript, from its path and sibling meta file.
+ * Null for a main transcript. Read once per file; the meta file is written
+ * when the agent is spawned, before its first line.
+ */
+function readAgentStamp(file: string): AgentStamp | null {
+  const m = /[\\/]subagents[\\/](?:.*[\\/])?agent-([^\\/]+)\.jsonl$/.exec(file);
+  if (!m) return null;
+  const stamp: AgentStamp = {
+    agent_id: m[1],
+    agent_kind: /[\\/]subagents[\\/]workflows[\\/]/.test(file) ? 'workflow' : 'subagent',
+  };
+  try {
+    const meta = safeJsonParse(readFileSync(file.replace(/\.jsonl$/, '.meta.json'), 'utf8'));
+    // Real key is agentType (Claude Code 2.1.x); the rest are tolerated spellings.
+    const type = meta && (str(meta['agentType']) ?? str(meta['subagent_type']) ?? str(meta['type']) ?? str(meta['label']));
+    if (type) stamp.agent_type = type;
+  } catch {
+    // No meta file: kind and id still come from the path.
+  }
+  return stamp;
+}
+
 /** Reads the `version` field off the first line that carries one. */
 function readVersionFromTranscript(file: string): string | undefined {
   for (const line of readHeadLines(file)) {
@@ -268,6 +336,12 @@ function readVersionFromTranscript(file: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Maps Claude Code's usage block onto the normalized shape.
+ *
+ * thinking_tokens sits under output_tokens_details and is a SUBSET of
+ * output_tokens — it must not be added on top, or thinking gets billed twice.
+ */
 export function readUsage(raw: unknown): TokenUsage {
   const usage = (raw ?? {}) as Record<string, unknown>;
   const details = (usage['output_tokens_details'] ?? {}) as Record<string, unknown>;

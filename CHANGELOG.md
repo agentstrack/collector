@@ -10,6 +10,34 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-05
+
+### Added
+- **Skills, sub-agents and workflows are named.** A Claude Code `tool_use` named `Skill` carries
+  `skill`; `Agent` carries `subagent_type` and `description`; `Workflow` carries `workflow_name`
+  (the `name` from the script's `meta` header, when it is that simple). The `Agent` call's prompt and the
+  script body are never copied out of the call; a sub-agent transcript's own opening prompt is a
+  prompt like any other and follows `privacy.prompts`. The extras ride on `tool.started` and on the matching
+  `tool.completed` / `tool.failed`.
+- **Sub-agent transcripts are attributed.** Claude Code writes each sub-agent to
+  `<session-uuid>/subagents/[workflows/<wf>/]agent-<id>.jsonl` with the parent's session id; the
+  tailer already walked them, but nothing said which lines were the sub-agent's. Every event from
+  such a file (or any line with `isSidechain: true`) now carries `sidechain: true`, `agent_id`,
+  `agent_kind` (`subagent` | `workflow`) and, from the sibling `agent-<id>.meta.json`, `agent_type`
+  — so the sub-agent's own `model.response` usage can be attributed to it server-side.
+- **`user.prompted.ultracode`**, `true` when the prompt contains the whole word `ultracode`
+  (case-insensitive). Computed locally before redaction, so it survives `metadata` mode; the prompt
+  does not travel to be inspected.
+- **Machine info on register and health.** Alongside `hostname`, `os` and `arch` the collector now
+  sends `os_release` and `machine_kind` — `ci` (a CI env var), `container`
+  (`/.dockerenv` or a docker/containerd/kubepods cgroup), `workstation` (macOS, Windows, or Linux
+  with a display), `server` (headless Linux), else `unknown`. Health repeats it, so a device that
+  changes shape is updated. See the README privacy section for what the server does with it.
+
+### Changed
+- `description` (the Agent tool's one-line label) is treated like a title: secret-redacted, and
+  dropped in `metadata` mode.
+
 ### Security
 - **`api_url` must be `https`.** The bearer API key rides on every request, so `http` is now rejected
   for any host except `localhost`/`127.0.0.1`/`[::1]`. `login` prints the URL it is about to use.
@@ -325,5 +353,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
 - The service installer supports launchd and systemd only. `agentstrack start --foreground` works
   anywhere Node 20+ does.
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/agentstrack/collector/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/agentstrack/collector/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/agentstrack/collector/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/agentstrack/collector/releases/tag/v0.1.0

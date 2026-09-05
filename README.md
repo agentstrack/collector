@@ -87,7 +87,8 @@ Nothing showing up? Run `agentstrack doctor`.
 | Lines added/removed per edit, computed locally from the tool input | Send the lines themselves |
 | Git branch, commit SHA, additions/deletions/files changed | Send your git remote URL (only a SHA-256 of it) or commit messages and diffs |
 | A session title — the first line of the prompt, capped at 120 chars and secret-redacted (`analytics` mode and above) | Send the rest of the prompt those titles were taken from |
-| Your hostname, OS, arch and each detected agent's version — **once, at registration** | Store the raw hostname server-side (it is kept only as a SHA-256) |
+| Your hostname, OS and release, arch, Node version, a coarse machine kind (`workstation` / `server` / `container` / `ci`) and each detected agent's version — at registration and with each health report | Show your hostname or IP address in the product — see [Machine info](#machine-info) |
+| Which skill, sub-agent type or workflow a Claude Code session invoked, and which events came from a sub-agent | Copy the `Agent` call's prompt or a workflow script's body out of the call (a sub-agent transcript's own opening prompt follows `privacy.prompts` like any other prompt) |
 | | Install hooks or modify `~/.claude/settings.json` / `~/.codex/hooks.json` |
 | | Send `organization_id` or `user_id` — they are not in the wire format at all |
 | | Watch your keyboard, your screen, or any process on your machine |
@@ -334,6 +335,22 @@ The project root itself (`repo.project_path`) is **dropped entirely** in `never`
 modes — it is only transmitted if you opt into `file_paths: absolute`. Repositories are correlated
 by `remote_hash`, a SHA-256 of the normalized remote URL, not by path.
 
+### Machine info
+
+`login` (registration) and the daemon's health report, once a minute, send: `hostname`, `os`
+(`darwin` / `linux` / `win32`), `os_release` (`os.release()`), `arch`, and
+`machine_kind` — `ci` when `CI`, `GITHUB_ACTIONS` or `GITLAB_CI` is set; `container` when
+`/.dockerenv` exists or `/proc/1/cgroup` mentions docker, containerd or kubepods; `workstation` on
+macOS and Windows, or Linux with `DISPLAY` / `WAYLAND_DISPLAY` / a graphical `XDG_SESSION_TYPE`;
+`server` for headless Linux; `unknown` otherwise. It is derived from those probes only.
+
+The server keeps the hostname (raw, plus a SHA-256 that keys registration) and the IP address it
+saw the register, health and upload requests come from, **for operations and abuse prevention
+only** — telling one machine's collector from another, and shutting off a key that is being abused.
+Neither is returned by any user-facing endpoint or shown anywhere in the product; the dashboard
+identifies a device by its label and machine kind. Everything else in the list (OS, arch, kind,
+versions) is what the device page shows.
+
 ### Excluding a project entirely
 
 ```yaml
@@ -377,8 +394,9 @@ Registration is idempotent on (user, hostname hash), so re-running `login` on th
 the existing collector instead of fragmenting its history. The config file is written mode `600`, in
 a directory created mode `700`.
 
-The registration payload is `hostname`, `label`, `os`, `arch`, the collector's own version, and one
-entry per configured agent: `{ agent, version }`. The **agent version is the real one**, read out of
+The registration payload is `hostname`, `label`, `os`, `os_release`, `arch`, `machine_kind`,
+(see [Machine info](#machine-info)), the collector's own version, and one entry per
+configured agent: `{ agent, version }`. The **agent version is the real one**, read out of
 a transcript the agent already wrote (`2.1.247`, say, from Claude Code's `version` field). Where an
 adapter cannot cheaply establish a version at detection time the field is simply **omitted** rather
 than filled with a placeholder, so a missing version in the dashboard means "not reported", never
@@ -598,7 +616,7 @@ database filename or an absolute path — the same override OpenCode itself hono
 
 | Agent | Status | Reads |
 |---|---|---|
-| **Claude Code** | ✅ Stable | `~/.claude/projects/<slug>/<session-uuid>.jsonl` |
+| **Claude Code** | ✅ Stable | `~/.claude/projects/<slug>/<session-uuid>.jsonl`, plus `<session-uuid>/subagents/**/agent-<id>.jsonl` |
 | **Codex** | ✅ Stable | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | **OpenCode** | ✅ Stable | `~/.local/share/opencode/opencode.db` — SQLite, opened **read-only** |
 | Gemini CLI · Cursor · Cline · Copilot CLI | 🗓 Planned | ids reserved in the schema, no adapter yet |
@@ -622,6 +640,7 @@ identical things:
 | Commits | ✅ (from `git log`, not the transcript) | ✅ (same) | ✅ (same) |
 | Plan / subscription type | ➖ | ✅ `plan_type` | ➖ |
 | Account attribution | ✅ from `~/.claude.json` | ➖ no account file | ✅ from `account.json`, per provider |
+| Skills / sub-agents / workflows | ✅ `Skill`, `Agent`, `Workflow` tool calls named; sub-agent transcripts stamped `sidechain` | ➖ Codex's `spawn_agent` collaboration tools are defined in its prompt but no rollout on hand shows one invoked, so nothing is parsed yet | ➖ `parent_session_id` only |
 
 Every adapter is read-only. Adapter formats drift between agent releases: an unparseable line is
 skipped, never fatal to the file.

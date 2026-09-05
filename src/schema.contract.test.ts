@@ -45,6 +45,10 @@ async function fixtureEnvelopes(): Promise<Record<string, unknown>[]> {
   const ctx = { collectorId, sourceFile: '/tmp/f.jsonl' };
   const claude = new ClaudeCodeAdapter();
   for (const line of fixture('claude-session.jsonl')) events.push(...claude.normalize(line, ctx));
+  for (const line of fixture('claude-assists.jsonl')) events.push(...claude.normalize(line, ctx));
+  const subagent = '06f3470f-d924-4552-b3ee-3f8924286cec/subagents/agent-x.jsonl';
+  const subagentPath = join(import.meta.dirname, '../test/fixtures', subagent);
+  for (const line of fixture(subagent)) events.push(...claude.normalize(line, { ...ctx, sourceFile: subagentPath }));
   const codex = new CodexAdapter();
   for (const line of fixture('codex-session.jsonl')) events.push(...codex.normalize(line, ctx));
 

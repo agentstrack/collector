@@ -28,7 +28,7 @@ export interface PipelineResult {
 }
 
 /** Payload keys that carry free text and must always be scanned for secrets. */
-const TEXT_KEYS = ['prompt_text', 'derived_title', 'message', 'command'] as const;
+const TEXT_KEYS = ['prompt_text', 'derived_title', 'message', 'command', 'description'] as const;
 
 export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): PipelineResult {
   const mode = ctx.config.privacy.mode;
@@ -43,6 +43,8 @@ export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): Pipeli
     delete payload['prompt_text'];
     delete payload['derived_title'];
     delete payload['message'];
+    // An Agent call's one-line description is agent-written free text, like a title.
+    delete payload['description'];
     // A shell command line IS content: it carries hostnames, client names,
     // usernames and inline passwords. `metadata` promises none of that, so the
     // binary name is all that may travel regardless of shell_arguments.

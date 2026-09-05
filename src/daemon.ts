@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFileSync, renameSync, statSync } from 'node:fs';
-import { hostname, arch, platform } from 'node:os';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig, saveConfig, SPOOL_PATH, LOG_PATH, type Config } from './config.js';
 import { Spool } from './queue/spool.js';
+import { machineInfo } from './machine.js';
 import { tailFile } from './queue/tailer.js';
 import { deterministicEventId } from './queue/event-id.js';
 export { deterministicEventId };
@@ -244,9 +244,7 @@ export class Collector {
       this.adapters.map(async (a) => ({ agent: a.id, version: (await a.detect()).version })),
     );
     const result = await this.client.registerCollector({
-      hostname: hostname(),
-      os: platform(),
-      arch: arch(),
+      ...machineInfo(),
       version: VERSION,
       // Report what this device enforces, so a session records the mode that
       // actually applied rather than the org default.
@@ -669,6 +667,7 @@ export class Collector {
         this.adapters.map(async (a) => ({ agent: a.id, version: (await a.detect()).version })),
       );
       await this.client.health({
+        ...machineInfo(),
         collector_id: this.config.collector_id,
         queue_depth: this.spool.depth(),
         version: VERSION,

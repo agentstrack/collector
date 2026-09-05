@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { gzipSync } from 'node:zlib';
 import { z } from 'zod';
 import type { EventEnvelope } from '../schema.js';
+import type { MachineInfo } from '../machine.js';
 
 /** Read from package.json so the CLI, register and health can never drift from what is published. */
 export const VERSION: string = (
@@ -65,11 +66,14 @@ export class ApiError extends Error {
 export class ApiClient {
   constructor(private readonly options: ClientOptions) {}
 
-  async registerCollector(input: {
+  /**
+   * Register and health both carry `MachineInfo`. The server keeps hostname,
+   * os, release, arch, machine kind and the request IP for operations and
+   * abuse prevention only; none of it is shown in the product.
+   */
+  async registerCollector(input: Partial<MachineInfo> & {
     hostname: string;
     label?: string;
-    os?: string;
-    arch?: string;
     version?: string;
     /** The mode this device will actually enforce, which may be stricter than the org's. */
     privacy_mode?: string;
@@ -92,7 +96,15 @@ export class ApiClient {
     return parsed.data;
   }
 
-  async health(input: { collector_id: string; queue_depth: number; version?: string; privacy_mode?: string; agents: { agent: string; version?: string }[] }): Promise<{ ok: boolean }> {
+  async health(
+    input: Partial<MachineInfo> & {
+      collector_id: string;
+      queue_depth: number;
+      version?: string;
+      privacy_mode?: string;
+      agents: { agent: string; version?: string }[];
+    },
+  ): Promise<{ ok: boolean }> {
     return this.request('POST', '/v1/collector/health', input);
   }
 

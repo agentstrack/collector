@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { ClaudeCodeAdapter, readUsage } from './claude.js';
 import { CodexAdapter, readCodexUsage } from './codex.js';
 import type { NormalizedEvent } from './types.js';
+import { applyPrivacy } from '../privacy/pipeline.js';
+import { Config } from '../config.js';
+import { SCHEMA_VERSION } from '../schema.js';
 
 const fixture = (name: string) =>
   readFileSync(join(import.meta.dirname, '../../test/fixtures', name), 'utf8').split('\n').filter(Boolean);
@@ -84,6 +87,63 @@ describe('ClaudeCodeAdapter', () => {
     expect(types).toContain('command.executed');
     const cmd = events.find((e) => e.event.event_type === 'command.executed');
     expect(cmd!.event.payload['command']).toContain('vitest');
+  });
+
+  it('names what Skill, Agent and Workflow calls invoked — never the prompt or the script', () => {
+    const assists = run(new ClaudeCodeAdapter(), fixture('claude-assists.jsonl'));
+    const started = assists.filter((e) => e.event.event_type === 'tool.started').map((e) => e.event.payload);
+    expect(started).toEqual([
+      expect.objectContaining({ tool_name: 'Skill', skill: 'artifact-design' }),
+      expect.objectContaining({ tool_name: 'Agent', subagent_type: 'payment-integration', description: 'Finish Stripe billing' }),
+      expect.objectContaining({ tool_name: 'Workflow', workflow_name: 'agentstrack-marketing-site' }),
+    ]);
+    for (const p of started) {
+      expect(p).not.toHaveProperty('prompt');
+      expect(p).not.toHaveProperty('script');
+      expect(p).not.toHaveProperty('sidechain');
+    }
+    // The extras ride on the terminal event too, which is what the server counts.
+    const done = assists.filter((e) => e.event.event_type === 'tool.completed').map((e) => e.event.payload);
+    expect(done).toEqual([
+      expect.objectContaining({ tool_name: 'Agent', subagent_type: 'payment-integration' }),
+      expect.objectContaining({ tool_name: 'Skill', skill: 'artifact-design' }),
+    ]);
+  });
+
+  it('flags an ultracode prompt as a whole word, and the flag survives metadata mode', () => {
+    const prompts = run(new ClaudeCodeAdapter(), fixture('claude-assists.jsonl')).filter(
+      (e) => e.event.event_type === 'user.prompted',
+    );
+    expect(prompts.map((p) => p.event.payload['ultracode'])).toEqual([true, undefined]);
+    const { event } = applyPrivacy(
+      { ...prompts[0]!.event, event_id: ctx.collectorId, collector_id: ctx.collectorId, schema_version: SCHEMA_VERSION },
+      { config: Config.parse({ privacy: { mode: 'metadata' } }) },
+    );
+    expect(event.payload).toMatchObject({ ultracode: true });
+    expect(event.payload).not.toHaveProperty('prompt_text');
+  });
+
+  it('stamps every event from a sub-agent transcript with its identity, from the path and meta file', () => {
+    const dir = join(import.meta.dirname, '../../test/fixtures/06f3470f-d924-4552-b3ee-3f8924286cec/subagents');
+    const adapter = new ClaudeCodeAdapter();
+    const at = (file: string) =>
+      readFileSync(file, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .flatMap((l) => adapter.normalize(l, { ...ctx, sourceFile: file }));
+
+    const sub = at(join(dir, 'agent-x.jsonl'));
+    expect(sub.map((e) => e.event.event_type)).toEqual(['user.prompted', 'model.response', 'tool.started', 'file.read', 'tool.completed']);
+    for (const e of sub) {
+      expect(e.event.session_id).toBe('06f3470f-d924-4552-b3ee-3f8924286cec');
+      expect(e.event.payload).toMatchObject({ sidechain: true, agent_id: 'x', agent_kind: 'subagent', agent_type: 'payment-integration' });
+    }
+    // The sub-agent's own usage is what the server attributes to the agent.
+    expect(sub[1]!.event.payload['usage']).toMatchObject({ cache_creation_input_tokens: 38833, output_tokens: 120 });
+
+    const wf = at(join(dir, 'workflows/wf_1/agent-y.jsonl'));
+    expect(wf).toHaveLength(1);
+    expect(wf[0]!.event.payload).toMatchObject({ sidechain: true, agent_id: 'y', agent_kind: 'workflow', agent_type: 'workflow-subagent' });
   });
 
   it('carries repo context through', () => {
