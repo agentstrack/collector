@@ -7,9 +7,9 @@ name: CodeQL
 # log line.
 on:
   push:
-    branches: [main]
+    branches: [master, develop]
   pull_request:
-    branches: [main]
+    branches: [master, develop]
   schedule:
     # Weekly, so a newly published query rule finds existing code rather than
     # waiting for the next commit. Monday 07:20 UTC, off the hour to avoid the
