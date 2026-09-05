@@ -36,7 +36,9 @@ Consequences:
 - Rotating a key re-attributes nothing retroactively.
 
 Also absent from every payload outside opt-in `full` mode: prompt text and code content. See the
-[privacy section of the README](../README.md#privacy).
+[privacy section of the README](../README.md#privacy). When redaction catches a secret the envelope
+reports the pattern and a count ([`secrets_redacted`](#secrets_redacted)) — never the matched value,
+not even hashed.
 
 ---
 
@@ -152,6 +154,29 @@ Absent on every event from the main transcript.
 | `agent_kind` | `subagent` \| `workflow` | `workflow` when the file sits under `subagents/workflows/`. |
 | `agent_type` | string | `agentType` from the sibling `agent-<id>.meta.json` — `general-purpose`, `workflow-subagent`, a custom agent name. Absent when the meta file is missing. |
 
+### `secrets_redacted`
+
+Present on **any** event where local redaction fired, in **every** privacy mode including
+`metadata`. It reports *that* a secret-shaped string was found and *which* pattern matched — never
+the value.
+
+| Field | Type | Notes |
+|---|---|---|
+| `kind` | string | The rule that matched: a built-in name (`aws_access_key`, `github_token`, …) or `org_rule` for anything your organization added — an org rule name can itself describe the shape of that org's secrets, so it is never sent. |
+| `count` | int ≥ 1 | How many matches that rule replaced across the event's text fields. A secret echoed in both a prompt and its derived title counts twice. |
+
+```json
+"secrets_redacted": [
+  { "kind": "aws_access_key", "count": 1 },
+  { "kind": "github_token", "count": 2 }
+]
+```
+
+Sorted by `kind`, and **absent entirely** when nothing fired — the key's presence is itself the
+signal. The tally is computed before the mode strip deletes the text, which is why it survives
+`metadata` mode: the count is metadata, the prompt is not. What never appears here, or anywhere
+else in the envelope: the matched text, a prefix of it, a hash of it, or the characters around it.
+
 ### `RepoContext`
 
 | Field | Type | Notes |
@@ -182,7 +207,7 @@ session's working directory.
 | `provider` | string | Provider the session ran on, when the agent records one. |
 | `agent_mode` | string | The agent's own mode label — OpenCode's `build` / `plan`. |
 | `parent_session_id` | string | Set on a sub-agent session (OpenCode's `task` tool). |
-| `derived_title` | string | Same privacy rules as on `user.prompted`. OpenCode names its own sessions. |
+| `derived_title` | string | Same privacy rules as on `user.prompted`. OpenCode names its own sessions, so this one is whatever OpenCode already truncated it to; it is redacted by the pipeline, but any truncation upstream of us is outside our control. |
 | `account` | `Account` | See below. |
 | `repo` | `RepoContext` | |
 
@@ -209,7 +234,7 @@ The event where privacy mode is most visible.
 | Field | Type | Sent in |
 |---|---|---|
 | `prompt_chars` | int ≥ 0 | all modes — a **count**, not the text |
-| `derived_title` | string (≤200) | `analytics`, `full` — the first meaningful line of the prompt, computed **on your machine** and truncated to 120 characters; the raw text is then deleted. Dropped in `analytics` under `privacy.prompts: never`, and in `metadata` by the mode itself. Not yet dropped by `never` under `mode: full` |
+| `derived_title` | string (≤200) | `analytics`, `full` — the first meaningful line of the prompt, computed **on your machine**: the prompt is secret-redacted first, then truncated to 120 characters, then the raw text is deleted. Redaction before truncation is what stops a key that straddles the cut from shipping as an unmatchable fragment (fixed in 0.4.1). Dropped under `privacy.prompts: never` in every mode, and in `metadata` by the mode itself |
 | `task_category` | enum | schema only — not populated in 0.1.0 |
 | `ultracode` | `true` | all modes — present only when the prompt contains the whole word `ultracode` (case-insensitive). A boolean computed locally before redaction; the prompt is not uploaded to find it. |
 | `prompt_text` | string | **`full` mode with `privacy.prompts: full` only.** Redacted first; absent entirely otherwise. |

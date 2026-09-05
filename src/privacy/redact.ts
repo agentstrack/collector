@@ -47,13 +47,27 @@ export const BUILTIN_RULES: RedactionRule[] = [
 
 export interface RedactionResult {
   text: string;
-  /** Names of rules that fired, for the trust metrics in BLUEPRINT §14. */
+  /** Reported kinds of the rules that fired, for the trust metrics in BLUEPRINT §14. */
   redactions: string[];
+  /** How many matches each reported kind replaced. Never the matched text. */
+  counts: Record<string, number>;
 }
+
+/** The one kind reported for any rule that is not built in. */
+export const ORG_RULE_KIND = 'org_rule';
+
+const BUILTIN_NAMES = new Set(BUILTIN_RULES.map((rule) => rule.name));
+
+/**
+ * An org's own rule name can itself describe the shape of that org's secrets
+ * ("acme_prod_db_password"), which is their business and not ours to ship back
+ * to the server. Anything not built in therefore reports as one generic kind.
+ */
+const reportedKind = (name: string): string => (BUILTIN_NAMES.has(name) ? name : ORG_RULE_KIND);
 
 export function redact(input: string, extraRules: RedactionRule[] = []): RedactionResult {
   let text = input;
-  const redactions: string[] = [];
+  const counts: Record<string, number> = {};
 
   for (const rule of [...BUILTIN_RULES, ...extraRules]) {
     // Org rules see only a bounded prefix; the untouched tail is re-appended.
@@ -62,14 +76,18 @@ export function redact(input: string, extraRules: RedactionRule[] = []): Redacti
     // Fresh lastIndex per call: these regexes are global and module-level, so
     // reusing them statefully across calls would skip matches.
     rule.pattern.lastIndex = 0;
-    if (!rule.pattern.test(subject)) continue;
+    // `match` on a global regex returns every match, so the tally is a count of
+    // matches rather than of rules. Only the length is ever read.
+    const hits = subject.match(rule.pattern)?.length ?? 0;
+    if (hits === 0) continue;
     rule.pattern.lastIndex = 0;
     const replaced = subject.replace(rule.pattern, rule.replacement);
     text = capped ? replaced + text.slice(ORG_SUBJECT_CAP) : replaced;
-    redactions.push(rule.name);
+    const kind = reportedKind(rule.name);
+    counts[kind] = (counts[kind] ?? 0) + hits;
   }
 
-  return { text, redactions };
+  return { text, redactions: Object.keys(counts), counts };
 }
 
 /**

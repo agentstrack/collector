@@ -10,6 +10,54 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-05
+
+### Fixed
+
+- **A session title could ship a piece of a secret (security).** `derived_title` is the first
+  meaningful line of your prompt, cut to 120 characters. Until now that cut was made on the **raw**
+  prompt and the secret scan ran afterwards, on the already-shortened title. If a key happened to
+  straddle the 120-character boundary, the cut split it in two, the leftover head no longer looked
+  like a key to any pattern, and it was uploaded as ordinary title text. A prompt of a hundred
+  characters followed by an `sk-ant-…` key produced a title ending in `sk-ant-api03-AAAAA…` while
+  the event dutifully reported `secrets_redacted: [{ anthropic_key, 1 }]` — the tally was right and
+  the title still carried a fragment.
+
+  The prompt is now redacted **before** the title is taken from it, in all three adapters (Claude
+  Code, Codex, OpenCode), so a truncation can only ever cut through a `[REDACTED:…]` marker. The
+  privacy pipeline still redacts `derived_title` afterwards; that pass is now a no-op and stays in
+  place as defence in depth.
+
+  The same cut-then-scan mistake applied to a Codex `error` event's `message`, truncated to 1000
+  characters; it is redacted before truncation now too.
+
+  **What to do:** only a partial value could escape, never a whole one, and only when a secret sat
+  across the cut. But a fragment is enough to identify which key was pasted, and the rest of it may
+  be guessable from context. If you have used `analytics` or `full` mode, look through your existing
+  session titles for key-shaped fragments, and rotate anything you find. Titles produced from 0.4.1
+  on are safe.
+
+  Fragments already uploaded stay in the product until you delete those sessions — upgrading the
+  collector does not rewrite history.
+
+### Changed
+
+- Documented the ordering (redact, then truncate) in the README and `docs/EVENT_SCHEMA.md`, and
+  corrected two stale lines there that still said `privacy.prompts: never` leaves `derived_title`
+  in place under `mode: full`. It has not since 0.4.0 — `never` drops it in every mode.
+
+## [0.4.0] — 2026-09-05
+
+### Added
+- **Secret exposure is reported as metadata.** When local redaction fires, the event now carries
+  `secrets_redacted: [{ kind, count }]` — which pattern matched and how many times, sorted by kind
+  and omitted entirely when nothing fired. The matched value never travels: not the text, not a
+  prefix of it, not a hash, not the surrounding context. The tally is computed **before** the mode
+  strip, so it survives `metadata` mode — the mode where a team most wants to know a credential was
+  typed into an agent and least wants the credential itself. An org-supplied rule reports as the
+  single generic kind `org_rule`, because a rule name can itself describe the shape of that
+  organization's secrets.
+
 ## [0.3.0] — 2026-09-05
 
 ### Added
@@ -353,7 +401,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
 - The service installer supports launchd and systemd only. `agentstrack start --foreground` works
   anywhere Node 20+ does.
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/agentstrack/collector/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/agentstrack/collector/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/agentstrack/collector/compare/v0.1.0...v0.2.0

@@ -5,6 +5,7 @@ import type { AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, Nor
 import { newestJsonl, num, readHeadLines, safeJsonParse, str } from './types.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
+import { redact } from '../privacy/redact.js';
 
 /**
  * OpenAI Codex CLI adapter.
@@ -187,10 +188,14 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     if (kind === 'error' || kind === 'stream_error') {
+      const message = str(payload['message']);
       return [
         this.wrap(state, occurredAt, 'error', {
           error_kind: kind,
-          message: str(payload['message'])?.slice(0, 1000),
+          // Redacted before the truncation, for the same reason deriveTitle is:
+          // a cut through a secret leaves two halves that match no pattern, so
+          // the privacy pipeline's later pass over `message` ships the fragment.
+          message: message === undefined ? undefined : redact(message).text.slice(0, 1000),
         }),
       ];
     }

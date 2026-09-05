@@ -17,7 +17,7 @@ git clone https://github.com/agentstrack/collector.git
 cd collector
 npm install
 
-npm test            # vitest run  — 119 tests today
+npm test            # vitest run  — 176 tests today
 npm run test:watch  # vitest
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc -> dist/, chmod +x dist/cli.js

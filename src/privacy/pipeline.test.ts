@@ -309,3 +309,40 @@ describe('metadata mode treats a shell command as content', () => {
     }
   });
 });
+
+describe('privacy pipeline — secret exposure tally', () => {
+  const AWS = 'AKIAIOSFODNN7EXAMPLE';
+  const GH = 'ghp_' + 'a'.repeat(36);
+
+  const leaky = (): EventEnvelope => ({
+    ...promptEvent(),
+    payload: {
+      prompt_chars: 90,
+      prompt_text: `deploy with ${AWS} and push with ${GH}`,
+      derived_title: 'deploy and push',
+    },
+  });
+
+  it('reports which patterns fired and how often — in every mode, never the value', () => {
+    for (const mode of ['metadata', 'analytics', 'full'] as const) {
+      const { event } = applyPrivacy(leaky(), { config: config(mode, { prompts: 'full' }) });
+      expect(event.payload['secrets_redacted'], mode).toEqual([
+        { kind: 'aws_access_key', count: 1 },
+        { kind: 'github_token', count: 1 },
+      ]);
+      // Nothing anywhere in the envelope — any field, any depth — carries the
+      // secret itself. This is the whole point of the feature.
+      const serialized = JSON.stringify(event);
+      expect(serialized, mode).not.toContain(AWS);
+      expect(serialized, mode).not.toContain(GH);
+    }
+  });
+
+  it('leaves the key off entirely when nothing fired', () => {
+    const { event } = applyPrivacy(
+      { ...promptEvent(), payload: { prompt_chars: 4, derived_title: 'add a test' } },
+      { config: config('analytics') },
+    );
+    expect(event.payload).not.toHaveProperty('secrets_redacted');
+  });
+});

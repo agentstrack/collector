@@ -40,7 +40,7 @@ describe('secret redaction', () => {
 
   it('leaves ordinary prose untouched', () => {
     const text = 'Refactor the auth guard and add tests for the cost calculator';
-    expect(redact(text)).toEqual({ text, redactions: [] });
+    expect(redact(text)).toEqual({ text, redactions: [], counts: {} });
   });
 
   it('is not stateful across calls — global regexes must not skip matches', () => {
@@ -56,6 +56,14 @@ describe('secret redaction', () => {
     const out = redact(`${a} and ${b}`);
     expect(out.text).not.toContain(a);
     expect(out.text).not.toContain(b);
+  });
+
+  it('counts how many times each rule fired, per rule name', () => {
+    const a = 'ghp_' + 'a'.repeat(36);
+    const b = 'ghp_' + 'b'.repeat(36);
+    const out = redact(`${a} and ${b} and AKIAIOSFODNN7EXAMPLE`);
+    expect(out.counts).toEqual({ github_token: 2, aws_access_key: 1 });
+    expect(out.redactions).toEqual(['github_token', 'aws_access_key']);
   });
 
   it('has no rule with a catastrophic-looking nested quantifier', () => {
@@ -86,6 +94,14 @@ describe('compileRules', () => {
     expect(rules).toHaveLength(1);
     expect(rules[0]!.name).toBe('org_rule_1');
     expect(redact('see INTERNAL-99', rules).text).toBe('see [TICKET]');
+  });
+
+  it('reports an org rule under a generic kind, never the name the org gave it', () => {
+    // The rule name can itself describe the shape of the org's secrets.
+    const rules = compileRules([{ pattern: 'INTERNAL-\\d+', replacement: '[TICKET]' }]);
+    const out = redact('see INTERNAL-4321 and INTERNAL-9', rules);
+    expect(out.counts).toEqual({ org_rule: 2 });
+    expect(out.redactions).toEqual(['org_rule']);
   });
 
   it('caps the subject an org rule sees so it cannot scan an unbounded input', () => {

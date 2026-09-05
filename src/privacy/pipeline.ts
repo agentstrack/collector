@@ -28,14 +28,32 @@ export interface PipelineResult {
 }
 
 /** Payload keys that carry free text and must always be scanned for secrets. */
+/** Cut applied to `derived_title` only after every rule, org rules included, has run. */
+export const TITLE_MAX_LENGTH = 120;
+
 const TEXT_KEYS = ['prompt_text', 'derived_title', 'message', 'command', 'description'] as const;
 
 export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): PipelineResult {
   const mode = ctx.config.privacy.mode;
   const policy = ctx.config.privacy;
   const extraRules: RedactionRule[] = ctx.compiledRules ?? compileRules(ctx.orgRules ?? []);
-  const redactions: string[] = [];
   const payload: Record<string, unknown> = { ...event.payload };
+
+  // --- secret tally, computed BEFORE the mode strip ------------------------
+  // Which pattern fired and how many times is metadata, not content: no matched
+  // text, no prefix of it, no hash, no context. It is computed on the original
+  // fields so it survives `metadata` mode, which deletes them below — and
+  // `metadata` is exactly where a team most wants to know a secret was typed.
+  // ponytail: text fields are scanned twice (tally here, redaction of the
+  // survivors below). Prompts are small; revisit if profiling ever says so.
+  const counts: Record<string, number> = {};
+  for (const key of TEXT_KEYS) {
+    const value = event.payload[key];
+    if (typeof value !== 'string') continue;
+    for (const [kind, n] of Object.entries(redact(value, extraRules).counts)) {
+      counts[kind] = (counts[kind] ?? 0) + n;
+    }
+  }
 
   // --- content: strip anything the mode does not permit -------------------
   if (mode === 'metadata') {
@@ -81,9 +99,16 @@ export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): Pipeli
   for (const key of TEXT_KEYS) {
     const value = payload[key];
     if (typeof value !== 'string') continue;
-    const result = redact(value, extraRules);
-    payload[key] = result.text;
-    redactions.push(...result.redactions);
+    payload[key] = redact(value, extraRules).text;
+  }
+
+  // The title is cut to length HERE, after redaction with the org's rules and
+  // not before it. deriveTitle deliberately hands over the whole line: cutting
+  // earlier bisects a straddling secret into two halves that match no pattern,
+  // which is how a fragment used to reach the server inside the title.
+  const title = payload['derived_title'];
+  if (typeof title === 'string' && title.length > TITLE_MAX_LENGTH) {
+    payload['derived_title'] = `${title.slice(0, TITLE_MAX_LENGTH - 1)}…`;
   }
 
   // --- paths --------------------------------------------------------------
@@ -135,5 +160,14 @@ export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): Pipeli
     payload['command'] = payload['command'].split(/\s+/)[0] ?? '';
   }
 
-  return { event: { ...event, payload }, redactions };
+  // --- secret tally ------------------------------------------------------
+  // Attached last, in every mode, so no strip above can remove it. Sorted by
+  // kind so two identical events serialize identically; omitted when nothing
+  // fired, so the key's presence alone means "a secret was caught here".
+  const secretsRedacted = Object.entries(counts)
+    .map(([kind, count]) => ({ kind, count }))
+    .sort((a, b) => a.kind.localeCompare(b.kind));
+  if (secretsRedacted.length > 0) payload['secrets_redacted'] = secretsRedacted;
+
+  return { event: { ...event, payload }, redactions: secretsRedacted.map((s) => s.kind) };
 }

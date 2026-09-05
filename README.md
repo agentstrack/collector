@@ -86,8 +86,9 @@ Nothing showing up? Run `agentstrack doctor`.
 | File paths, **relative to the project root by default** | Send absolute paths — which leak your username and your clients' names — unless you opt in |
 | Lines added/removed per edit, computed locally from the tool input | Send the lines themselves |
 | Git branch, commit SHA, additions/deletions/files changed | Send your git remote URL (only a SHA-256 of it) or commit messages and diffs |
-| A session title — the first line of the prompt, capped at 120 chars and secret-redacted (`analytics` mode and above) | Send the rest of the prompt those titles were taken from |
+| A session title — the first line of the prompt, secret-redacted and then capped at 120 chars (`analytics` mode and above) | Send the rest of the prompt those titles were taken from |
 | Your hostname, OS and release, arch, Node version, a coarse machine kind (`workstation` / `server` / `container` / `ci`) and each detected agent's version — at registration and with each health report | Show your hostname or IP address in the product — see [Machine info](#machine-info) |
+| That local redaction fired: which pattern matched and how many times (`secrets_redacted`), in every privacy mode | Send the secret it matched — not the text, not a prefix of it, not a hash of it, not the characters around it |
 | Which skill, sub-agent type or workflow a Claude Code session invoked, and which events came from a sub-agent | Copy the `Agent` call's prompt or a workflow script's body out of the call (a sub-agent transcript's own opening prompt follows `privacy.prompts` like any other prompt) |
 | | Install hooks or modify `~/.claude/settings.json` / `~/.codex/hooks.json` |
 | | Send `organization_id` or `user_id` — they are not in the wire format at all |
@@ -178,7 +179,7 @@ agentstrack doctor --json               # structured diagnostics, safe to paste 
                                    ▼
        ┌────────────────────────┐
        │    privacy pipeline    │  mode-based content strip
-       │                        │  → 15 built-in secret rules + org rules
+       │                        │  → 16 built-in secret rules + org rules
        │                        │  → path normalization
        │                        │  → raw content DISCARDED HERE
        └───────────┬────────────┘
@@ -265,6 +266,9 @@ Two properties of that deletion are worth stating explicitly, because both are e
 
 `analytics` is the honest middle: the title is computed **on your machine** from the prompt, and then
 the prompt is deleted. The server receives `"fix flaky auth test"`, never the 900 words you typed.
+The prompt is redacted **before** the title is cut out of it, so the cut can only ever land inside a
+`[REDACTED:…]` marker and never through the middle of a key. Before 0.4.1 it was cut first, which
+could ship half of a secret — see the CHANGELOG.
 
 If even the title is too much, `privacy.prompts: never` drops that too: in `analytics` it strips
 `derived_title`, so nothing derived from a prompt leaves the machine, without giving up token, tool
@@ -288,8 +292,8 @@ daemon cannot drift.
 
 ### Built-in secret redaction
 
-Every free-text field that survives the mode strip (`prompt_text`, `derived_title`, `message`,
-`command`) passes through these 15 rules, most-specific first, on your machine:
+Every free-text field (`prompt_text`, `derived_title`, `message`, `command`, `description`) passes
+through these 16 rules, most-specific first, on your machine:
 
 | Rule | Catches |
 |---|---|
@@ -306,13 +310,15 @@ Every free-text field that survives the mode strip (`prompt_text`, `derived_titl
 | `jwt` | three-segment `eyJ…` tokens |
 | `bearer_header` | `Bearer <token>` → `Bearer [REDACTED]` |
 | `basic_auth_url` | `https://user:pw@host` → `https://[REDACTED]@host` |
+| `inline_password_flag` | `-pSECRET`, `--password=SECRET`, `--password "SECRET"` |
 | `env_assignment` | `*SECRET*=`, `*TOKEN*=`, `*PASSWORD*=`, `*PASSWD*=`, `*APIKEY*=`, `*API_KEY*=`, `*ACCESS_KEY*=`, `*PRIVATE_KEY*=` |
 | `generic_hex_secret` | bare hex strings of 40+ characters |
 
-A match is replaced in place, and most rules substitute `[REDACTED:rule_name]`. Four do not:
+A match is replaced in place, and most rules substitute `[REDACTED:rule_name]`. Five do not:
 `bearer_header` → `Bearer [REDACTED]` and `basic_auth_url` → `scheme://[REDACTED]@host` keep the
-surrounding syntax so the shape of the command survives, `env_assignment` → `NAME=[REDACTED]` keeps
-the variable name, and `generic_hex_secret` substitutes the shorter `[REDACTED:hex]`. Your
+surrounding syntax so the shape of the command survives, `env_assignment` → `NAME=[REDACTED]` and
+`inline_password_flag` → `--password=[REDACTED]` keep the variable or flag name, and
+`generic_hex_secret` substitutes the shorter `[REDACTED:hex]`. Your
 organization can add patterns server-side; an org pattern that is malformed, longer than 256
 characters, or using a backreference is skipped, the common catastrophic nested-quantifier shapes
 (`(a+)+`, `(a|aa)+`, `((a+)b)+`) are rejected — a heuristic, not a proof — and org patterns are
@@ -320,6 +326,26 @@ matched against at most the first 64 KB of any value.
 
 Redaction is defence in depth, not the primary control. The primary control is that in `metadata`
 and `analytics` modes the content is **deleted locally** and never enters the pipeline at all.
+
+### What a redaction reports
+
+When a rule fires, the event carries `secrets_redacted` — a list of `{ kind, count }`, sorted by
+kind, absent when nothing fired:
+
+```json
+"secrets_redacted": [{ "kind": "aws_access_key", "count": 1 }]
+```
+
+Plainly: **we report that a secret-shaped string was found and which pattern matched it. We never
+send the value.** Not the matched text, not a prefix of it, not a hash of it, not the surrounding
+context — there is nothing in the payload to reverse. A rule your organization added reports as the
+single generic kind `org_rule`, because a rule name (`acme_prod_db_password`) can itself describe
+the shape of your secrets.
+
+This travels in **every** mode, `metadata` included: the tally is computed before the mode strip
+deletes the text it was computed from. A count is metadata; the prompt it came from is not. And
+`metadata` is exactly the mode where a team most wants to know that a live credential was pasted
+into an agent — the point being to go rotate it, which needs no copy of it.
 
 ### How file paths are handled
 
@@ -554,10 +580,10 @@ privacy:
 
   # never | local_summary_only (default) | full
   # `full` is what keeps `mode: full` from uploading prompt text unless you also
-  # ask for it here. `never` suppresses prompt text in every mode, and in
-  # `analytics` it additionally drops the locally derived `derived_title`, so
-  # nothing derived from a prompt leaves the machine at all. Under `mode: full`
-  # it does NOT drop `derived_title` — see the privacy section.
+  # ask for it here. `never` suppresses prompt text in every mode, and it
+  # additionally drops the locally derived `derived_title` in every mode too —
+  # `analytics` and `full` alike — so nothing derived from a prompt leaves the
+  # machine at all. See the privacy section.
   prompts: local_summary_only
 
   # never (default) | full
