@@ -80,5 +80,5 @@ jobs:
         run: |
           gh release create "${{ inputs.tag || github.ref_name }}" \
             --title "${{ inputs.tag || github.ref_name }}" \
-            --notes "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)." \
+            --notes "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/master/CHANGELOG.md)." \
             --verify-tag

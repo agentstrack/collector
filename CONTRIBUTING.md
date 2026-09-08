@@ -10,14 +10,14 @@ Thanks for being here. The most valuable contributions to this repo, in order:
 
 ## Development setup
 
-CI runs Node **20** and **22** on Ubuntu and macOS; the published package declares `engines.node >= 20`.
+CI runs Node **22** and **24** on Ubuntu and macOS; the published package declares `engines.node >= 22`.
 
 ```bash
 git clone https://github.com/agentstrack/collector.git
 cd collector
 npm install
 
-npm test            # vitest run  — 176 tests today
+npm test            # vitest run  — 177 tests today
 npm run test:watch  # vitest
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc -> dist/, chmod +x dist/cli.js
