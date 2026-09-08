@@ -401,9 +401,15 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
 - The service installer supports launchd and systemd only. `agentstrack start --foreground` works
   anywhere Node 20+ does.
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.0
+<!-- 0.2.0 and 0.4.0 have no tag: this repository's history was squashed before
+     it was made public, and no commit in it carries either version. The releases
+     were real (0.2.0 is on npm) and their notes stay above; the compare links
+     simply skip to the neighbouring tag that does exist. -->
+
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1
+[0.4.0]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/agentstrack/collector/compare/v0.2.1...v0.3.0
-[0.2.1]: https://github.com/agentstrack/collector/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/agentstrack/collector/compare/v0.1.0...v0.2.0
+[0.2.1]: https://github.com/agentstrack/collector/compare/v0.1.0...v0.2.1
+[0.2.0]: https://github.com/agentstrack/collector/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/agentstrack/collector/releases/tag/v0.1.0
