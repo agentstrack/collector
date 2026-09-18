@@ -1,4 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import {
+  EXIT_UPDATED, compareVersions, installVersion, latestVersion, selfUpdatable,
+} from './update.js';
 import { appendFileSync, renameSync, statSync } from 'node:fs';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -128,6 +132,9 @@ type BatchOutcome =
   | { kind: 'paused'; reason: PauseReason; detail: string };
 
 /** Waves one daemon tick may send before scan() gets the loop back. */
+/** How often the daemon asks the registry whether a newer release exists. */
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 const MAX_WAVES_PER_TICK = 5;
 
 /** Spool meta key naming the current upload pause (`<reason>: <detail>`); `status` prints it. */
@@ -176,6 +183,9 @@ export class Collector {
   /** agent::session_id -> last activity, for idle session.ended. */
   private readonly openSessions = new Map<string, OpenSession>();
   private running = false;
+  /** Warn-once flags: these states are normal and must not spam the log. */
+  private warnedNotUpdatable = false;
+  private warnedAttempted = false;
 
   constructor(
     private config: Config,
@@ -194,6 +204,7 @@ export class Collector {
     this.running = true;
     await this.ensureRegistered();
     await this.refreshServerConfig();
+    this.reconcileIfBackendChanged();
 
     log(`Collector ${VERSION} started — agents: ${this.adapters.map((a) => a.id).join(', ')}`);
 
@@ -201,6 +212,10 @@ export class Collector {
     const uploadInterval = this.config.upload.interval_seconds * 1000;
     let lastUpload = 0;
     let lastHealth = 0;
+    // Checked shortly after boot rather than immediately: a machine waking up
+    // with no network would otherwise burn its one attempt on a failed fetch,
+    // and an update is never urgent enough to race the network coming up.
+    let lastUpdateCheck = Date.now() - UPDATE_CHECK_INTERVAL_MS + 60_000;
 
     while (this.running) {
       try {
@@ -220,6 +235,10 @@ export class Collector {
           lastHealth = now;
           await this.reportHealth();
         }
+        if (now - lastUpdateCheck >= UPDATE_CHECK_INTERVAL_MS) {
+          lastUpdateCheck = now;
+          await this.maybeSelfUpdate();
+        }
       } catch (error) {
         log(`Upload error: ${errorMessage(error)}`);
       }
@@ -227,6 +246,115 @@ export class Collector {
       // A backlog alternates scan and flush without the 5s pause between them.
       await sleep(more ? 0 : scanInterval);
     }
+  }
+
+  /**
+   * A backend this spool has not uploaded to holds none of its history, so
+   * the checkpoints — which only ever meant "already sent" — are meaningless
+   * against it. Forget them once and let the normal scan re-read everything;
+   * the server keeps what it lacks and reports the rest as duplicates.
+   *
+   * This is the automatic half of reconciliation, and it fires on exactly the
+   * case that motivated it: `login` against a different deployment. Before
+   * this, pointing a collector at a new backend uploaded only what happened
+   * *after* the switch, and every earlier session stayed on disk looking
+   * uploaded — silent, and invisible until someone counted rows.
+   *
+   * Keyed on api_url + collector_id together: the id alone changes on a
+   * re-login to the same server (harmless, but a needless re-upload), and the
+   * url alone misses one deployment restoring another's database.
+   */
+  private reconcileIfBackendChanged(): void {
+    const backend = `${this.config.api_url}\n${this.config.collector_id ?? ''}`;
+    const seen = this.spool.getMeta('uploaded_backend');
+    if (seen === backend) return;
+
+    if (seen === null) {
+      // First run of this spool. Checkpoints cannot be stale against a backend
+      // nothing was ever sent to, so record and move on — re-reading here
+      // would make every fresh install start with a full backfill it does not
+      // need.
+      this.spool.setMeta('uploaded_backend', backend);
+      return;
+    }
+
+    const cleared = this.spool.clearCheckpoints();
+    this.spool.setMeta('uploaded_backend', backend);
+    log(
+      `Backend changed — reconciling: cleared ${cleared} read checkpoint(s), ` +
+        'every transcript will be re-read and anything this backend is missing re-sent ' +
+        '(already-known events come back as duplicates and are not stored twice).',
+    );
+  }
+
+  /**
+   * Install a newer release and exit so the supervisor starts it.
+   *
+   * Everything here fails soft. A collector that cannot update must still
+   * collect, so an unreachable registry, a refused install or a missing npm
+   * are all logged and shrugged off — the running version keeps working.
+   */
+  private async maybeSelfUpdate(): Promise<void> {
+    if (!this.config.auto_update) return;
+
+    const here = fileURLToPath(import.meta.url);
+    const updatable = selfUpdatable(here);
+    if (!updatable.ok) {
+      // Once per process, not once per check: this is the normal state on a
+      // developer's machine and does not need repeating every six hours.
+      if (!this.warnedNotUpdatable) {
+        this.warnedNotUpdatable = true;
+        log(`Auto-update skipped — ${updatable.reason}.`);
+      }
+      return;
+    }
+
+    const latest = await latestVersion();
+    if (!latest || compareVersions(latest, VERSION) <= 0) return;
+
+    // One attempt per version, remembered across restarts. Without this, a
+    // release that installs but cannot start would exit non-zero on every
+    // boot and burn systemd's StartLimitBurst, taking the service down for
+    // good over a bad publish.
+    const attempted = this.spool.getMeta('update_attempted');
+    if (attempted === latest) {
+      if (!this.warnedAttempted) {
+        this.warnedAttempted = true;
+        log(`Auto-update: ${latest} was already attempted and did not take — staying on ${VERSION}.`);
+      }
+      return;
+    }
+    this.spool.setMeta('update_attempted', latest);
+
+    log(`Auto-update: ${VERSION} -> ${latest}, installing…`);
+    let installed: string | null = null;
+    try {
+      installed = await installVersion(latest);
+    } catch (error) {
+      log(`Auto-update failed to install ${latest}: ${errorMessage(error)} — staying on ${VERSION}.`);
+      return;
+    }
+
+    if (installed !== latest) {
+      log(`Auto-update: install reported ${installed ?? 'nothing'}, expected ${latest} — staying on ${VERSION}.`);
+      return;
+    }
+
+    // Flush first. The spool survives a restart, but sending what we already
+    // have costs one request and means an update never widens the window
+    // where recent work is only on this disk.
+    try {
+      await this.flush(MAX_WAVES_PER_TICK);
+    } catch {
+      // Not worth aborting the update over; the spool keeps the events.
+    }
+
+    log(`Auto-update: installed ${latest}, exiting ${EXIT_UPDATED} so the service restarts into it.`);
+    this.running = false;
+    this.stop();
+    // Non-zero on purpose: both supervisors restart on failure and treat a
+    // clean exit as "meant to stop". This is the documented way back up.
+    process.exit(EXIT_UPDATED);
   }
 
   stop(): void {
@@ -282,6 +410,14 @@ export class Collector {
   }
 
   /** One pass over every tracked transcript file. */
+  /**
+   * One scan pass, for callers that are not the daemon loop — `sync --full`
+   * needs the transcripts read before there is anything to upload.
+   */
+  async scanOnce(): Promise<void> {
+    await this.scan();
+  }
+
   private async scan(): Promise<void> {
     const collectorId = this.config.collector_id;
     if (!collectorId) return;

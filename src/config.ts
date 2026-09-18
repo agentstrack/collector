@@ -37,6 +37,17 @@ export const Config = z.object({
       'api_url must be https (http is allowed only for localhost)',
     )
     .default(DEFAULT_API_URL),
+  /**
+   * Keep this collector up to date by itself.
+   *
+   * On by default: it runs unattended under a supervisor, so a fix otherwise
+   * waits for someone to notice and run npm by hand on every machine. It only
+   * ever installs this package, by exact version, from the public registry,
+   * and only when the running copy is a global npm install — see update.ts.
+   * Set false where a fleet pins versions centrally and a machine updating
+   * itself would fight that.
+   */
+  auto_update: z.boolean().default(true),
   /** Written by `agentstrack login`. File is chmod 600. */
   api_key: z.string().optional(),
   collector_id: z.string().uuid().optional(),

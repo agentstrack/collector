@@ -215,6 +215,27 @@ export class Spool {
     this.checkpoints.set(path, { inode, offset, size });
   }
 
+  /**
+   * Forget every read checkpoint, so the next scan re-reads each transcript
+   * from byte 0.
+   *
+   * Safe to do because an event id is derived from
+   * `(adapter, file, offset, line)` and is the server's primary key: a
+   * re-read reproduces the same ids, and the server counts them as
+   * `duplicates` rather than writing them twice. That is what makes
+   * reconciliation a re-read instead of a diff — and why this must never be
+   * paired with a change to the id seed.
+   *
+   * The spooled queue is deliberately left alone. Events already waiting are
+   * still owed to the server; dropping them here would turn a reconcile into
+   * data loss in the one case it exists to repair.
+   */
+  clearCheckpoints(): number {
+    const { changes } = this.db.prepare('DELETE FROM checkpoints').run();
+    this.checkpoints.clear();
+    return changes;
+  }
+
   getMeta(key: string): string | null {
     return (this.stmt.getMeta.get(key) as { value: string } | undefined)?.value ?? null;
   }

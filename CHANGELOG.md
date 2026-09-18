@@ -10,6 +10,45 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.4.3] — 2026-09-18
+
+### Added
+
+- **`sync --full` re-reads everything and re-sends whatever the server is missing.**
+  Plain `sync` only drains the queue, so anything the spool already considered sent
+  stayed on disk no matter what the server actually held. `--full` forgets the read
+  checkpoints and re-reads every transcript from byte 0.
+
+  Re-reading is safe rather than merely tolerable: an `event_id` is derived from
+  `(adapter, file, offset, line)` and is the server's primary key, so the same line
+  always produces the same id and the server stores it once. What comes back as
+  `duplicates` is the proof it already had it. Nothing is written twice, and the
+  queued events are left alone — dropping those would turn a reconcile into data loss
+  in the one case it exists to repair.
+
+- **Reconciliation happens on its own when the backend changes.** Pointing a collector
+  at a different deployment — `login` against another instance — used to upload only
+  what happened *after* the switch, while every earlier session sat on disk looking
+  uploaded. Silent, and invisible until someone counted rows. The daemon now notices
+  that the `api_url` + `collector_id` pair is one this spool has not uploaded to,
+  clears the checkpoints once, and lets the next scan refill the gap. A fresh install
+  is exempt: checkpoints cannot be stale against a backend nothing was ever sent to.
+
+- **Auto-update (`auto_update`, default `true`).** The collector runs unattended under
+  a supervisor, so a fix otherwise waits for someone to run npm by hand on every
+  machine. It checks the registry every six hours and installs a newer release itself.
+
+  Bounded deliberately: it installs only this package, by exact version, from the
+  public registry, and only when the running copy is a global npm install — a source
+  checkout is never touched, because `npm i -g` over a working tree would replace what
+  its author is editing. The restart is an exit, not an exec: both supervisors restart
+  on failure, so it exits `70` and lets them start the new code. And it attempts a
+  given version once, remembered across restarts, so a release that installs but
+  cannot run costs one restart and a log line instead of burning systemd's
+  `StartLimitBurst` and taking the service down for good.
+
+  Set `auto_update: false` where a fleet pins versions centrally.
+
 ## [0.4.2] — 2026-09-18
 
 ### Fixed
@@ -428,7 +467,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/agentstrack/collector/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/agentstrack/collector/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1
 [0.4.0]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1

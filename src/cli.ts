@@ -400,10 +400,24 @@ program
   .description('Upload any queued events now and exit')
   .option('--dry-run', 'show what would be uploaded without sending anything')
   .option('--print', 'with --dry-run, print the full event bodies')
-  .action(async (options: { dryRun?: boolean; print?: boolean }) => {
+  .option(
+    '--full',
+    're-read every transcript and re-send anything the server is missing, ignoring read checkpoints',
+  )
+  .action(async (options: { dryRun?: boolean; print?: boolean; full?: boolean }) => {
     const config = requireLogin();
 
     if (options.dryRun) {
+      // --full has to forget the checkpoints to find out what a re-read would
+      // produce, and a dry run that mutates state is not a dry run. Say so
+      // rather than accept the flag and quietly ignore it.
+      if (options.full) {
+        console.log(
+          pc.yellow('!') +
+            ' --full is ignored with --dry-run: computing it means clearing read checkpoints, which a dry run must not do.',
+        );
+        console.log(pc.dim('  Showing the currently queued events instead.\n'));
+      }
       // The privacy claim made verifiable: this is exactly what would leave
       // the machine, after redaction, with nothing sent.
       const spool = new Spool(SPOOL_PATH);
@@ -429,7 +443,33 @@ program
       return;
     }
 
+    // --full drops the read checkpoints first, so the scan below re-reads
+    // every transcript from byte 0 instead of resuming. The re-read is safe,
+    // not merely tolerable: an event id is derived from
+    // (adapter, file, offset, line) and is the server's primary key, so the
+    // same line always produces the same id and the server stores it once.
+    // What comes back as `duplicates` is the proof it already had it.
+    if (options.full) {
+      const spool = new Spool(SPOOL_PATH);
+      const cleared = spool.clearCheckpoints();
+      spool.close();
+      console.log(
+        `Reconciling: cleared ${cleared} read checkpoint(s) — re-reading every transcript.`,
+      );
+      console.log(
+        pc.dim('  Events the server already has return as duplicates and are not stored twice.'),
+      );
+    }
+
     const collector = new Collector(config);
+    // A plain sync uploads what is already queued. A full one has to scan
+    // first — with the checkpoints gone there is nothing in the queue yet, and
+    // exiting on an empty queue would make --full a no-op that looked like
+    // success.
+    if (options.full) {
+      console.log('Scanning transcripts…');
+      await collector.scanOnce();
+    }
     const before = collector.queueDepth();
     if (before === 0) {
       console.log(pc.green('✓') + ' Queue is already empty.');
