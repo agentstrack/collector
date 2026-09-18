@@ -1,6 +1,6 @@
 {
   "name": "@agentstrack/collector",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Privacy-first telemetry collector for AI coding agents \u2014 Claude Code, Codex, and more. Local-first, open source.",
   "license": "Apache-2.0",
   "type": "module",

@@ -10,6 +10,28 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-18
+
+### Fixed
+
+- **`login` sent the key to whatever host was configured last.** The endpoint was
+  carried forward from the existing config, so pasting a production key on a machine
+  still pointed at another instance sent it there and failed with
+  `401 {"message":"Invalid API key"}` — accurate about the response, wrong about the
+  cause, and the key is the first thing anyone re-checks.
+
+  A login is an environment switch at least as often as a key rotation, and a key
+  issued by one deployment means nothing to another. The endpoint now comes from
+  `--api-url` or the production default (`https://api.agentstrack.ai`), never from the
+  stale value. Self-hosters pass `--api-url`, which is what that flag is for; it still
+  persists in the config for the daemon afterwards.
+
+  Switching silently in the other direction would be the same bug pointing elsewhere,
+  so a login that moves the endpoint now prints `! Switching endpoint: <old> → <new>`.
+
+  **What to do:** nothing, unless you self-host and script `agentstrack login` without
+  `--api-url` — add it, or the next login retargets that machine at the hosted service.
+
 ## [0.4.1] — 2026-09-05
 
 ### Fixed
@@ -406,7 +428,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/agentstrack/collector/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1
 [0.4.0]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/agentstrack/collector/compare/v0.2.1...v0.3.0
