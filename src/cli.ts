@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { stringify } from 'yaml';
 import {
-  CONFIG_PATH, LOG_PATH, PID_PATH, SPOOL_PATH, loadConfig, saveConfig, Config, configExists,
+  CONFIG_PATH, DEFAULT_API_URL, LOG_PATH, PID_PATH, SPOOL_PATH, loadConfig, saveConfig, Config, configExists,
 } from './config.js';
 import { Collector, VERSION, buildAdapters, errorMessage, listTranscripts, log } from './daemon.js';
 import { ApiClient } from './transport/client.js';
@@ -51,7 +51,16 @@ program
     try {
       config = Config.parse({
         ...existing,
-        api_url: options.apiUrl ?? existing.api_url,
+        // Production unless --api-url says otherwise — NOT the URL that
+        // happened to be configured before. A login is an environment switch
+        // at least as often as it is a key rotation, and a key issued by one
+        // deployment means nothing to another. Inheriting silently sent a
+        // production key to whatever host was configured last and reported the
+        // 401 as "Invalid API key" — true, and the least useful true thing to
+        // say, because the key was fine and the endpoint was wrong.
+        // Self-hosters pass --api-url, which is what that flag is for; the
+        // value still persists in the config for the daemon afterwards.
+        api_url: options.apiUrl ?? DEFAULT_API_URL,
         api_key: apiKey,
         // A new key may belong to a different org, so re-register.
         collector_id: undefined,
@@ -62,6 +71,17 @@ program
       return;
     }
 
+    // Say it out loud when this login moves the endpoint. Silently switching
+    // is the same class of bug as silently inheriting, just pointing the other
+    // way — a self-hoster who forgets --api-url must not discover the move by
+    // watching their own instance go quiet.
+    if (existing.api_url && existing.api_url !== config.api_url) {
+      console.log(
+        pc.yellow('!') +
+          ` Switching endpoint: ${existing.api_url} → ${config.api_url}` +
+          (options.apiUrl ? '' : pc.dim('  (pass --api-url to target another instance)')),
+      );
+    }
     console.log(pc.dim(`Connecting to ${config.api_url}…`));
     const client = new ApiClient({ apiUrl: config.api_url, apiKey });
     try {

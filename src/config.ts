@@ -15,6 +15,15 @@ export const PID_PATH = join(CONFIG_DIR, 'collector.pid');
  * On-disk config. Shape follows BLUEPRINT §9.4 so the documented example is
  * literally valid.
  */
+/**
+ * Where a collector talks to AgentsTrack unless told otherwise.
+ *
+ * `api.` rather than the apex: the dashboard routes `/v1` on `agentstrack.ai`
+ * so its session cookie stays same-origin, but a collector authenticates with
+ * an API key and has no cookie to keep, so it uses the host meant for it.
+ */
+export const DEFAULT_API_URL = 'https://api.agentstrack.ai';
+
 export const Config = z.object({
   api_url: z
     .string()
@@ -27,7 +36,7 @@ export const Config = z.object({
         /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?(\/|$)/.test(u),
       'api_url must be https (http is allowed only for localhost)',
     )
-    .default('https://api.agentstrack.ai'),
+    .default(DEFAULT_API_URL),
   /** Written by `agentstrack login`. File is chmod 600. */
   api_key: z.string().optional(),
   collector_id: z.string().uuid().optional(),
