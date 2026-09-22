@@ -39,9 +39,20 @@ export const BUILTIN_RULES: RedactionRule[] = [
   { name: 'bearer_header', pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{20,}=*/g, replacement: 'Bearer [REDACTED]' },
   { name: 'basic_auth_url', pattern: /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/g, replacement: '$1[REDACTED]@' },
   { name: 'env_assignment', pattern: /\b([A-Z_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z_]*)\s*=\s*("[^"]*"|'[^']*'|\S+)/g, replacement: '$1=[REDACTED]' },
-  // mysql/psql style inline credentials: -pSECRET, --password=SECRET. Extremely
-  // common in agent shell calls and missed by every key-shaped rule above.
-  { name: 'inline_password_flag', pattern: /(--password[= ]|(?<![\w-])-p)(?!\s)("[^"]*"|'[^']*'|\S+)/g, replacement: '$1[REDACTED]' },
+  // `--password=SECRET` / `--password SECRET`, on any command: the long form
+  // means one thing everywhere, so it needs no anchor.
+  { name: 'inline_password_flag', pattern: /(--password[= ])(?!\s)("[^"]*"|'[^']*'|\S+)/g, replacement: '$1[REDACTED]' },
+  // The short `-pSECRET` form, anchored to the commands that actually read
+  // `-p` as a password. Unanchored it matched `find -path`, `find -print`,
+  // `tar -pxzf` and `ssh -p2222` — flags an agent runs dozens of times an
+  // hour — and every one of those became a "rotate an exposed credential"
+  // alert with no credential behind it. A rule that cries wolf that often is
+  // worse than no rule: the real one gets filtered with the rest.
+  {
+    name: 'inline_password_flag',
+    pattern: /((?:^|[|;&]\s*|\s)(?:mysql|mysqladmin|mysqldump|mysqlshow|mariadb|mariadb-dump|mongo|mongosh|sshpass|smbclient)\b[^\n|;&]*?(?<![\w-])-p)(?!\s)("[^"]*"|'[^']*'|\S+)/g,
+    replacement: '$1[REDACTED]',
+  },
   { name: 'generic_hex_secret', pattern: /\b[a-f0-9]{40,}\b/g, replacement: '[REDACTED:hex]' },
 ];
 

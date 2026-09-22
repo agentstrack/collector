@@ -138,4 +138,32 @@ describe('inline password flags', () => {
     expect(redact('mkdir -p build').text).toBe('mkdir -p build');
     expect(redact('docker run -p 8080:80 img').text).toBe('docker run -p 8080:80 img');
   });
+
+  it('leaves -p flags of commands that have no password option alone', () => {
+    // Every one of these fired the rule before it was anchored, and each one
+    // mailed an owner "rotate an exposed credential" over a `find` flag.
+    for (const cmd of [
+      'find . -not -path "*/node_modules/*"',
+      'find . -name "*.ts" -print',
+      'find . -type d -prune',
+      'tar -pxzf archive.tgz',
+      'ssh -p2222 host',
+      'grep -perl foo .',
+    ]) {
+      expect(redact(cmd).text, cmd).toBe(cmd);
+      expect(redact(cmd).redactions, cmd).toEqual([]);
+    }
+  });
+
+  it('still catches the short form on commands that do take a password', () => {
+    for (const [input, secret] of [
+      ['mysql -u root -pHunter2 db', 'Hunter2'],
+      ['mysqldump -uroot -pHunter2 db > out.sql', 'Hunter2'],
+      ['sshpass -pHunter2 ssh host', 'Hunter2'],
+      ['docker build . && mysql -pHunter2', 'Hunter2'],
+    ] as const) {
+      expect(redact(input).text, input).not.toContain(secret);
+      expect(redact(input).redactions, input).toContain('inline_password_flag');
+    }
+  });
 });
