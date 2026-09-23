@@ -10,6 +10,21 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.4.4] — 2026-09-24
+
+### Fixed
+
+- **A commit is uploaded once, however often the collector restarts.** The commit
+  watcher remembers what it has sent in memory only, so a restart inside a session's
+  window sent the same commit again under a fresh random id, and the server stored
+  both. A `git.commit` event's id is now derived from the session and the commit sha,
+  so a repeat is dropped as a duplicate. It was the last event given a random id.
+- **`find -path`, `tar -p` and `ssh -p2222` no longer raise a leaked-password alert.**
+  The short `-pSECRET` form matched on any command, so flags an agent runs dozens of
+  times an hour became rotation alerts with no credential behind them. The short form
+  now matches only on commands that read `-p` as a password; `--password=X` and
+  `*_PASSWORD=` still match anywhere.
+
 ## [0.4.3] — 2026-09-18
 
 ### Added
@@ -467,7 +482,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/agentstrack/collector/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/agentstrack/collector/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/agentstrack/collector/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/agentstrack/collector/compare/v0.3.0...v0.4.1

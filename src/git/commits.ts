@@ -1,4 +1,5 @@
 import type { NormalizedEvent } from '../adapters/types.js';
+import { deterministicEventId } from '../queue/event-id.js';
 import { commitShasSince, commitStat, findGitRoot } from './repo.js';
 
 /**
@@ -119,6 +120,9 @@ export class GitCommitWatcher {
             },
           },
           cwd: repo.gitRoot,
+          // `emitted` is in memory, so a restart inside the window re-emits the
+          // commit; a fixed id lets the server drop the repeat.
+          eventId: deterministicEventId(`git.commit\n${repo.agent}\n${repo.sessionId}\n${ref.sha}`),
         });
       }
     }

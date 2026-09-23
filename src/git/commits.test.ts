@@ -54,6 +54,17 @@ describe('GitCommitWatcher', () => {
     expect(await watcher.poll()).toHaveLength(0);
   });
 
+  it('gives a commit the same event id after a restart, so the server drops the repeat', async () => {
+    const poll = async () => {
+      const watcher = new GitCommitWatcher();
+      watcher.observe([event('sess-1', new Date(Date.now() - 60_000))]);
+      return (await watcher.poll())[0]!.eventId;
+    };
+    const first = await poll();
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await poll()).toBe(first);
+  });
+
   it('polls nothing for a repo no session touched', async () => {
     expect(await new GitCommitWatcher().poll()).toEqual([]);
   });
