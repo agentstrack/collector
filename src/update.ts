@@ -23,6 +23,7 @@
  *    a log line, and the old version keeps collecting.
  */
 import { execFile } from 'node:child_process';
+import { delimiter, dirname } from 'node:path';
 import { promisify } from 'node:util';
 
 const run = promisify(execFile);
@@ -98,17 +99,31 @@ export function selfUpdatable(modulePath: string): { ok: boolean; reason?: strin
   return { ok: true };
 }
 
+/**
+ * The environment npm runs under: the running node's own bin directory first
+ * on PATH. launchd starts the service with PATH=/usr/bin:/bin:/usr/sbin:/sbin,
+ * where an nvm or Homebrew npm does not exist — and npm's own
+ * `#!/usr/bin/env node` would not find node there either. The npm installed
+ * beside this node is also the one whose global prefix holds this package.
+ */
+export function npmEnv(execPath: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...env, PATH: [dirname(execPath), env['PATH']].filter(Boolean).join(delimiter) };
+}
+
 /** Install an exact version globally. Returns the version actually on disk after. */
 export async function installVersion(version: string, timeoutMs = 180_000): Promise<string | null> {
   // Exact version, never a range or a dist-tag: whatever was decided from the
   // registry read is what gets installed, so the log line and the artifact
   // cannot disagree.
+  const env = npmEnv(process.execPath, process.env);
   await run('npm', ['install', '--global', `${PACKAGE_NAME}@${version}`, '--prefer-online'], {
     timeout: timeoutMs,
+    env,
   });
   try {
     const { stdout } = await run('npm', ['ls', '--global', '--depth', '0', '--json'], {
       timeout: 30_000,
+      env,
     });
     const tree = JSON.parse(stdout) as { dependencies?: Record<string, { version?: string }> };
     return tree.dependencies?.[PACKAGE_NAME]?.version ?? null;

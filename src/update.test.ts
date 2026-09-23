@@ -1,5 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { compareVersions, selfUpdatable } from './update.js';
+import { compareVersions, npmEnv, selfUpdatable } from './update.js';
 
 describe('compareVersions', () => {
   it('orders releases', () => {
@@ -40,5 +41,13 @@ describe('selfUpdatable', () => {
 
   it('refuses some other package that happens to live in node_modules', () => {
     expect(selfUpdatable('/usr/lib/node_modules/something-else/dist/daemon.js').ok).toBe(false);
+  });
+});
+
+describe('npmEnv', () => {
+  it('finds npm under the bare PATH launchd gives a service', () => {
+    // The failure it exists for: nvm/Homebrew npm is not on /usr/bin:/bin.
+    const env = npmEnv(process.execPath, { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' });
+    expect(execFileSync('npm', ['--version'], { env, encoding: 'utf8' }).trim()).toMatch(/^\d+\.\d+\.\d+/);
   });
 });

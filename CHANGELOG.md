@@ -10,6 +10,18 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.4.5] — 2026-09-24
+
+### Fixed
+
+- **Auto-update works under launchd.** The service starts with
+  `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, where an nvm or Homebrew `npm` does not exist,
+  so every update attempt on such a Mac failed to install — and, since each version is
+  attempted once, never retried. npm now runs with the running node's own directory
+  first on `PATH`. Machines on 0.4.3 or 0.4.4 still carry the old updater and need this
+  one upgrade by hand: `npm i -g @agentstrack/collector@latest`, then
+  `launchctl kickstart -k gui/$(id -u)/ai.agentstrack.collector`.
+
 ## [0.4.4] — 2026-09-24
 
 ### Fixed
@@ -482,7 +494,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.5...HEAD
+[0.4.5]: https://github.com/agentstrack/collector/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/agentstrack/collector/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/agentstrack/collector/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/agentstrack/collector/compare/v0.4.1...v0.4.2
