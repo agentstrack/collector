@@ -1,10 +1,10 @@
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { deterministicEventId } from '../queue/event-id.js';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import type { AccountIdentity, AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent } from './types.js';
 import { newestJsonl, num, readHeadLines, safeJsonParse, str } from './types.js';
-import { readClaudeAccount } from './account.js';
+import { readClaudeAccount, readClaudeLiveSessions } from './account.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
 
@@ -34,7 +34,6 @@ import { deriveTitle } from '../sessions/title.js';
  * so the server can attribute the sub-agent's own usage to it.
  */
 export const CLAUDE_DIR = process.env['CLAUDE_CONFIG_DIR'] ?? join(homedir(), '.claude');
-const PROJECTS_DIR = join(CLAUDE_DIR, 'projects');
 
 /**
  * Claude Code's own markup on a user line: slash-command echoes and background
@@ -66,16 +65,42 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   /** Cross-line facts within one transcript: a message's lines are contiguous. */
   private readonly fileState = new Map<string, FileState>();
 
+  /**
+   * Every Claude config directory seen: the daemon's own, the default one, each ~/.claude-*
+   * profile holding a login, and any directory a running process was launched
+   * with. Profile launchers (CLAUDE_CONFIG_DIR per account) are the reason.
+   */
+  private readonly configDirs = new Set<string>([resolve(CLAUDE_DIR), join(homedir(), '.claude')]);
+  /**
+   * One entry per real projects/ folder — profiles often share one via
+   * symlink — with the config dirs writing into it. `path` is the first
+   * owner's own spelling, not the realpath: event ids hash the file path, so
+   * the daemon's default ~/.claude/projects must keep the name it always had.
+   */
+  private projectOwners: { path: string; dirs: string[] }[] = [];
+  /**
+   * sessionId -> the login it ran under, pinned while its process was alive.
+   * Kept after the process exits: its last lines are often tailed after that.
+   * ponytail: grows by one small entry per session for the daemon's lifetime; prune if that ever matters.
+   */
+  private readonly sessionAccounts = new Map<string, AccountIdentity>();
+
+  /**
+   * Runs once per scan cycle (the daemon calls it before tailing), so this is
+   * also where the live session -> login map is refreshed.
+   */
   async detect(): Promise<DetectionResult> {
-    if (!existsSync(PROJECTS_DIR)) {
-      return { installed: false, watchPaths: [], note: `No transcripts at ${PROJECTS_DIR}` };
+    this.discover();
+    const watchPaths = this.projectOwners.map((o) => o.path);
+    if (watchPaths.length === 0) {
+      return { installed: false, watchPaths: [], note: `No transcripts at ${join(CLAUDE_DIR, 'projects')}` };
     }
     let version: string | undefined;
     try {
       // The version is stamped on every transcript line; read one cheaply.
-      const projects = readdirSync(PROJECTS_DIR).slice(0, 5);
+      const projects = readdirSync(watchPaths[0]!).slice(0, 5);
       for (const project of projects) {
-        const file = newestJsonl(join(PROJECTS_DIR, project));
+        const file = newestJsonl(join(watchPaths[0]!, project));
         if (!file) continue;
         version = readVersionFromTranscript(file);
         if (version) break;
@@ -83,20 +108,57 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     } catch {
       // Unreadable project dir is not fatal; the tailer reports per-file errors.
     }
-    return { installed: true, version, watchPaths: [PROJECTS_DIR] };
+    return { installed: true, version, watchPaths };
+  }
+
+  private discover(): void {
+    const home = homedir();
+    try {
+      for (const name of readdirSync(home)) {
+        if (!name.startsWith('.claude-')) continue;
+        const dir = join(home, name);
+        if (safeRealpath(join(dir, '.claude.json'))) this.configDirs.add(dir);
+      }
+    } catch {
+      // unreadable home: the daemon's own dir still works
+    }
+
+    // Live sessions first: they can name a config dir no rule above found.
+    const sessionDirs = new Set([...this.configDirs].flatMap((d) => safeRealpath(join(d, 'sessions')) ?? []));
+    for (const dir of sessionDirs) {
+      for (const live of readClaudeLiveSessions(dir)) {
+        this.configDirs.add(live.configDir);
+        const account = readClaudeAccount(live.configDir);
+        if (account) this.sessionAccounts.set(live.sessionId, account);
+      }
+    }
+
+    // Set order puts the daemon's own dir first, so it keeps its spelling.
+    const owners = new Map<string, { path: string; dirs: string[] }>();
+    for (const dir of this.configDirs) {
+      const path = join(dir, 'projects');
+      const real = safeRealpath(path);
+      if (!real) continue;
+      const owner = owners.get(real);
+      if (owner) owner.dirs.push(dir);
+      else owners.set(real, { path, dirs: [dir] });
+    }
+    this.projectOwners = [...owners.values()];
   }
 
   /**
-   * The account Claude Code is signed in as right now.
-   *
-   * ~/.claude.json carries a single `oauthAccount` and is rewritten on account
-   * switch, so this is a live reading with no history behind it. The daemon
-   * attaches it only to events written after the collector started — a
-   * transcript that was already on disk cannot be attributed retroactively and
-   * gets no account rather than the wrong one.
+   * The login a line belongs to. A session pinned by its live process wins;
+   * otherwise a projects/ folder only one login writes into names that login.
+   * A folder several logins share names nobody — the currently signed-in
+   * account there is a guess, and a guess reads exactly like a fact.
    */
-  account(): AccountIdentity | undefined {
-    return readClaudeAccount(CLAUDE_DIR);
+  private accountFor(sessionId: string, sourceFile: string): AccountIdentity | undefined {
+    const live = this.sessionAccounts.get(sessionId);
+    if (live) return live;
+    for (const { path, dirs } of this.projectOwners) {
+      if (sourceFile.startsWith(path + sep)) return dirs.length === 1 ? readClaudeAccount(dirs[0]!) : undefined;
+    }
+    return undefined;
   }
 
   async health(): Promise<HealthStatus> {
@@ -104,8 +166,10 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     if (!detection.installed) return { healthy: false, filesTracked: 0, error: detection.note };
     let filesTracked = 0;
     try {
-      for (const project of readdirSync(PROJECTS_DIR)) {
-        filesTracked += readdirSync(join(PROJECTS_DIR, project)).filter((f) => f.endsWith('.jsonl')).length;
+      for (const root of detection.watchPaths) {
+        for (const project of readdirSync(root)) {
+          filesTracked += readdirSync(join(root, project)).filter((f) => f.endsWith('.jsonl')).length;
+        }
       }
     } catch (error) {
       return { healthy: false, filesTracked: 0, error: error instanceof Error ? error.message : String(error) };
@@ -144,10 +208,16 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     const agent = state.agent ?? (raw['isSidechain'] === true ? { agent_kind: 'subagent' as const } : null);
     const stamp = agent ? { sidechain: true, ...agent, agent_id: str(raw['agentId']) ?? agent.agent_id } : {};
 
+    const account = this.accountFor(sessionId, ctx.sourceFile);
     const wrap = (
       event_type: NormalizedEvent['event']['event_type'],
       payload: Record<string, unknown>,
-    ): NormalizedEvent => ({ event: { ...base, event_type, payload: { ...payload, ...stamp } }, cwd, repo });
+    ): NormalizedEvent => ({
+      event: { ...base, event_type, payload: { ...payload, ...stamp } },
+      cwd,
+      repo,
+      ...(account ? { account } : {}),
+    });
 
     if (type === 'user') return this.normalizeUser(raw, state, wrap);
     if (type === 'assistant') return this.normalizeAssistant(raw, state, wrap);
@@ -393,4 +463,12 @@ function diffLines(before: string | undefined, after: string | undefined): { lin
   let removed = 0;
   for (const count of remaining.values()) removed += count;
   return { lines_added: added, lines_removed: removed };
+}
+
+function safeRealpath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
 }

@@ -632,7 +632,8 @@ upload:
 ```
 
 Environment overrides: `AGENTSTRACK_HOME` (all local state), `CLAUDE_CONFIG_DIR` (default
-`~/.claude`), `CODEX_HOME` (default `~/.codex`), `OPENCODE_DATA_DIR` (default
+`~/.claude`; `~/.claude-*` profiles and any directory a running Claude Code was launched with are
+found on their own), `CODEX_HOME` (default `~/.codex`), `OPENCODE_DATA_DIR` (default
 `$XDG_DATA_HOME/opencode`, falling back to `~/.local/share/opencode`) and `OPENCODE_DB` (the
 database filename or an absolute path — the same override OpenCode itself honours).
 
@@ -665,7 +666,7 @@ identical things:
 | Agent errors | ➖ not logged | ✅ `error` | ➖ not emitted |
 | Commits | ✅ (from `git log`, not the transcript) | ✅ (same) | ✅ (same) |
 | Plan / subscription type | ➖ | ✅ `plan_type` | ➖ |
-| Account attribution | ✅ from `~/.claude.json` | ➖ no account file | ✅ from `account.json`, per provider |
+| Account attribution | ✅ per session, from the login of the config dir its process runs under | ➖ no account file | ✅ from `account.json`, per provider |
 | Skills / sub-agents / workflows | ✅ `Skill`, `Agent`, `Workflow` tool calls named; sub-agent transcripts stamped `sidechain` | ➖ Codex's `spawn_agent` collaboration tools are defined in its prompt but no rollout on hand shows one invoked, so nothing is parsed yet | ➖ `parent_session_id` only |
 
 Every adapter is read-only. Adapter formats drift between agent releases: an unparseable line is

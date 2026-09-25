@@ -10,6 +10,18 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.4.6] — 2026-09-25
+
+### Fixed
+
+- **Claude Code sessions are attributed to the account that actually ran them.** Several logins
+  running side by side (one `CLAUDE_CONFIG_DIR` per profile, sharing one `projects/` folder) were
+  all attributed to whichever account `~/.claude.json` held. Each live session is now pinned to the
+  login of the config directory its process was launched with, read from
+  `<config>/sessions/<pid>.json` and the process environment. A profile's login is read from
+  inside its own directory, `~/.claude-*` profiles are discovered automatically, and a shared
+  transcript folder gives an unseen session no account rather than a guessed one.
+
 ## [0.4.5] — 2026-09-24
 
 ### Fixed

@@ -139,6 +139,15 @@ anything from a window when the daemon was down — carries **no** `account` at 
 today's account, which would be a plausible-looking lie. Live events, written while the collector
 was watching, carry one. Both files are re-read every scan cycle (cached on mtime), not once at boot.
 
+**Claude Code profiles.** Several logins can run side by side, one `CLAUDE_CONFIG_DIR` each, all
+writing into one shared `projects/` folder — so neither a transcript nor its path names the account.
+Every live Claude Code process writes `<config>/sessions/<pid>.json` with its `sessionId`, and its
+environment carries the `CLAUDE_CONFIG_DIR` it was launched with; the collector reads both each scan
+cycle and pins the session to that directory's login (`<config>/.claude.json`, or `~/.claude.json`
+for the default directory). A session it never saw live falls back to the login of its `projects/`
+folder only when exactly one config directory writes there. A folder that several logins share gives
+such a session **no** account, not whichever login happens to be current.
+
 ### Sub-agent stamp
 
 Claude Code writes each sub-agent to its own transcript,

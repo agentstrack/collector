@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readClaudeAccount, readOpenCodeAccounts, resetAccountCache } from './account.js';
+import { spawn } from 'node:child_process';
+import { readClaudeAccount, readClaudeLiveSessions, readOpenCodeAccounts, resetAccountCache } from './account.js';
 import { attributable } from '../daemon.js';
 
 const dirs: string[] = [];
@@ -142,4 +143,39 @@ describe('plan type drives cost basis', () => {
     expect(account?.planType).toBe('claude_max');
     rmSync(dir, { recursive: true, force: true });
   });
+});
+
+describe('Claude profiles (CLAUDE_CONFIG_DIR)', () => {
+  it('reads a profile’s login from inside its directory, not the default sibling', () => {
+    const home = scratch();
+    writeFileSync(join(home, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'default' } }));
+    const profile = join(home, '.claude-account-work');
+    mkdirSync(profile);
+    writeFileSync(join(profile, '.claude.json'), JSON.stringify({ oauthAccount: { accountUuid: 'work' } }));
+    expect(readClaudeAccount(profile)?.key).toBe('work');
+  });
+
+  it.skipIf(process.platform !== 'darwin' && process.platform !== 'linux')(
+    'maps a live session to the config dir its process was launched with, and skips dead pids',
+    async () => {
+      const sessions = scratch();
+      // node, not /bin/sleep: macOS hides the environment of SIP-protected system binaries.
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
+        env: { ...process.env, CLAUDE_CONFIG_DIR: '/tmp/profile-rbd' },
+      });
+      try {
+        await new Promise((r) => child.once('spawn', r));
+        const now = Date.now();
+        writeFileSync(join(sessions, `${child.pid}.json`), JSON.stringify({ pid: child.pid, sessionId: 'live', startedAt: now }));
+        // A pid that no longer runs: its file is stale and must not attribute.
+        const gone = spawn(process.execPath, ['-e', '']);
+        await new Promise((r) => gone.once('exit', r));
+        writeFileSync(join(sessions, `${gone.pid}.json`), JSON.stringify({ pid: gone.pid, sessionId: 'dead', startedAt: now }));
+        writeFileSync(join(sessions, '9999999.json'), JSON.stringify({ pid: 9999999, sessionId: 'bogus', startedAt: now }));
+        expect(readClaudeLiveSessions(sessions, '/default')).toEqual([{ sessionId: 'live', configDir: '/tmp/profile-rbd' }]);
+      } finally {
+        child.kill();
+      }
+    },
+  );
 });
