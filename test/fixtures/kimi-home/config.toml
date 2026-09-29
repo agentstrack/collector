@@ -1,0 +1,12 @@
+default_model = "kimi-code/kimi-for-coding"
+default_thinking = true
+
+[models."kimi-code/kimi-for-coding"]
+provider = "managed:kimi-code"
+model = "kimi-for-coding"
+max_context_size = 262144
+
+[providers."managed:kimi-code"]
+type = "kimi"
+base_url = "https://example.invalid/v1"
+api_key = "NOT-A-REAL-KEY"
