@@ -167,7 +167,9 @@ agentstrack doctor --json               # structured diagnostics, safe to paste 
 ```text
   ~/.claude/projects/<slug>/<session-uuid>.jsonl
   ~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl
-                    │                          ~/.local/share/opencode/opencode.db
+  ~/.gemini/tmp/<project>/chats/session-*.jsonl
+  ~/.kimi/sessions/<md5>/<session>/wire.jsonl            ~/.local/share/opencode/opencode.db
+                    │                          ~/.gemini/antigravity-cli/conversations/*.db
                     │  append-only files                    │
                     ▼                                       ▼
        ┌────────────────────────┐          ┌────────────────────────┐
@@ -528,6 +530,9 @@ tracking:
     - claude_code
     - codex
     - opencode
+    - antigravity
+    - gemini_cli
+    # - kimi_code      # opt-in: adapter not yet verified against real sessions
 upload:
   batch_size: 100
   interval_seconds: 30
@@ -635,7 +640,9 @@ Environment overrides: `AGENTSTRACK_HOME` (all local state), `CLAUDE_CONFIG_DIR`
 `~/.claude`; `~/.claude-*` profiles and any directory a running Claude Code was launched with are
 found on their own), `CODEX_HOME` (default `~/.codex`), `OPENCODE_DATA_DIR` (default
 `$XDG_DATA_HOME/opencode`, falling back to `~/.local/share/opencode`) and `OPENCODE_DB` (the
-database filename or an absolute path — the same override OpenCode itself honours).
+database filename or an absolute path — the same override OpenCode itself honours),
+`GEMINI_CLI_HOME` (Gemini CLI reads `$GEMINI_CLI_HOME/.gemini`, default `~/.gemini`) and
+`KIMI_SHARE_DIR` (default `~/.kimi`).
 
 ---
 
@@ -646,7 +653,10 @@ database filename or an absolute path — the same override OpenCode itself hono
 | **Claude Code** | ✅ Stable | `~/.claude/projects/<slug>/<session-uuid>.jsonl`, plus `<session-uuid>/subagents/**/agent-<id>.jsonl` |
 | **Codex** | ✅ Stable | `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` |
 | **OpenCode** | ✅ Stable | `~/.local/share/opencode/opencode.db` — SQLite, opened **read-only** |
-| Gemini CLI · Cursor · Cline · Copilot CLI | 🗓 Planned | ids reserved in the schema, no adapter yet |
+| **Antigravity CLI** (`agy`) | 🧪 New | `~/.gemini/antigravity-cli/conversations/<id>.db` — one SQLite db per conversation, read from a private **copy** |
+| **Gemini CLI** | 🧪 New | `~/.gemini/tmp/<project>/chats/session-*.jsonl` |
+| **Kimi Code** (`kimi-cli`) | ⚠️ Experimental, opt-in | `~/.kimi/sessions/<md5(work dir)>/<session>/wire.jsonl` — written from upstream source, not yet verified against real sessions |
+| Cursor · Cline · Copilot CLI | 🗓 Planned | ids reserved in the schema, no adapter yet |
 
 Per-signal honesty — the adapters do not produce identical data, because the agents do not record
 identical things:
@@ -666,8 +676,29 @@ identical things:
 | Agent errors | ➖ not logged | ✅ `error` | ➖ not emitted |
 | Commits | ✅ (from `git log`, not the transcript) | ✅ (same) | ✅ (same) |
 | Plan / subscription type | ➖ | ✅ `plan_type` | ➖ |
-| Account attribution | ✅ per session, from the login of the config dir its process runs under | ➖ no account file | ✅ from `account.json`, per provider |
+| Account attribution | ✅ per session, from the login of the config dir its process runs under | ✅ ChatGPT `account_id` from `auth.json` | ✅ from `account.json`, per provider |
 | Skills / sub-agents / workflows | ✅ `Skill`, `Agent`, `Workflow` tool calls named; sub-agent transcripts stamped `sidechain` | ➖ Codex's `spawn_agent` collaboration tools are defined in its prompt but no rollout on hand shows one invoked, so nothing is parsed yet | ➖ `parent_session_id` only |
+
+The newer adapters, briefly:
+
+- **Antigravity** — per model call `model.response` with input, cache-read, cache-write, output and
+  thinking tokens (from the step's `ModelUsageStats`); prompts; tool calls with real durations;
+  `run_command` commands; `view_file` reads; `write_to_file` / `replace_file_content` line counts.
+  Workspace and git branch come from the conversation's metadata — headless `agy -p` runs record no
+  workspace and are sent with no project. Account: the email in agy's own sign-in log line (agy
+  keeps its token in the keychain and writes no account file).
+- **Gemini CLI** — per response `model.response` (Gemini's `promptTokenCount` includes cached
+  tokens and `candidatesTokenCount` excludes thoughts; both are normalized), prompts (not the
+  injected `<session_context>` block or slash commands), terminal tool calls, shell commands and
+  `read_file` / `write_file` / `replace` effects. No tool durations — the log has one timestamp per
+  call. Account: `google_accounts.json`'s active email.
+- **Kimi Code** — per-step token usage, prompts, turns, tool calls paired with results for a
+  duration, `Shell` / `ReadFile` / `WriteFile` / `StrReplaceFile` effects, and sub-agent work relayed
+  through the parent session. The wire log never names the model, so the one in `config.toml`'s
+  `default_model` is used. No account.
+
+Google accounts expose no stable id on disk, only an email, so their `account.key` is a hash of it
+and the email travels only as the strippable label.
 
 Every adapter is read-only. Adapter formats drift between agent releases: an unparseable line is
 skipped, never fatal to the file.
@@ -690,12 +721,15 @@ tailer uses for transcripts.
 ### Which account did this?
 
 One machine often drives several accounts. Each session carries a stable, opaque `account.key`
-(Claude Code's `accountUuid`; OpenCode's `<serviceID>:<accountId>`) so their costs never merge. The
+(Claude Code's `accountUuid`; OpenCode's `<serviceID>:<accountId>`; Codex's ChatGPT `account_id`;
+a hash of the Google email for Gemini CLI and Antigravity) so their costs never merge. The
 readable half — email, organization name — is PII and is stripped in `metadata` mode, where sessions
 still split correctly but the account shows as opaque.
 
 **The credential is never read.** OpenCode's `account.json` stores a live API key next to the account
-id; only `id` and `serviceID` are touched, and `auth.json` is never opened at all.
+id; only `id` and `serviceID` are touched, and OpenCode's `auth.json` is never opened at all. Codex's
+`auth.json` is mostly tokens: only `tokens.account_id` and the decoded (unverified) payload of the
+`id_token` — email and plan — are used, and no token leaves the function that reads it.
 
 **Live events only.** These files record who is signed in *now* and are rewritten on account switch,
 so events that predate the collector's start carry **no** account rather than today's — a

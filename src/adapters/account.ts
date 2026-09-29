@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -30,6 +31,7 @@ const cache = new Map<string, { mtimeMs: number; size: number; value: unknown }>
 /** Test seam: forget cached identities so a rewritten file is re-read. */
 export function resetAccountCache(): void {
   cache.clear();
+  agyAccountCache = undefined;
 }
 
 /**
@@ -253,4 +255,138 @@ function identity(account: AccountIdentity): AccountIdentity {
   if (account.provider) out.provider = account.provider;
   if (account.planType) out.planType = account.planType;
   return out;
+}
+
+/**
+ * The Codex login that is active right now, from `$CODEX_HOME/auth.json`.
+ *
+ * The file is `{ auth_mode, OPENAI_API_KEY, tokens: { id_token, access_token,
+ * refresh_token, account_id }, last_refresh }` — almost entirely credentials.
+ * `tokens.account_id` is the one field that is an identifier and not a secret,
+ * so it is the key. The id_token's PAYLOAD is decoded (never verified, never
+ * kept) only for the email label and the plan; the token itself leaves this
+ * function as nothing. API-key logins carry no account at all and get none.
+ */
+export function readCodexAccount(codexDir: string): AccountIdentity | undefined {
+  return readCached<AccountIdentity | undefined>(
+    join(codexDir, 'auth.json'),
+    (raw) => {
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      const tokens = (parsed as Record<string, unknown>)['tokens'];
+      if (!tokens || typeof tokens !== 'object') return undefined;
+      const t = tokens as Record<string, unknown>;
+      const claims = jwtClaims(t['id_token']);
+      const auth = (claims['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>;
+      const key = str(t['account_id']) ?? str(auth['chatgpt_account_id']);
+      if (!key) return undefined;
+      return identity({
+        key,
+        label: str(claims['email']),
+        provider: 'openai',
+        planType: str(auth['chatgpt_plan_type']),
+      });
+    },
+    undefined,
+  );
+}
+
+/** A JWT's payload claims, decoded locally and unverified. Anything malformed is `{}`. */
+function jwtClaims(token: unknown): Record<string, unknown> {
+  if (typeof token !== 'string') return {};
+  const payload = token.split('.')[1];
+  if (!payload) return {};
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * A Google login as an account. Neither Gemini CLI nor Antigravity writes a
+ * stable non-PII account id anywhere on disk — only the email — and `key`
+ * travels in every privacy mode, so the key is a hash of the email and the
+ * email itself rides only as the (strippable) label.
+ */
+function googleIdentity(email: string): AccountIdentity {
+  const normalized = email.trim().toLowerCase();
+  return identity({
+    key: `google:${createHash('sha256').update(normalized).digest('hex').slice(0, 32)}`,
+    label: normalized,
+    provider: 'google',
+  });
+}
+
+/**
+ * Gemini CLI's active Google account: `<gemini home>/google_accounts.json`,
+ * `{ active: <email> | null, old: [<email>…] }` (UserAccountManager in 0.61).
+ * Credentials live in oauth_creds.json or the keychain and are never read.
+ */
+export function readGeminiAccount(geminiDir: string): AccountIdentity | undefined {
+  return readCached<AccountIdentity | undefined>(
+    join(geminiDir, 'google_accounts.json'),
+    (raw) => {
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return undefined;
+      const active = str((parsed as Record<string, unknown>)['active']);
+      return active ? googleIdentity(active) : undefined;
+    },
+    undefined,
+  );
+}
+
+const AGY_AUTH_LINE = /OAuth: authenticated successfully as (\S+@\S+)/g;
+let agyAccountCache: { newest: string; mtimeMs: number; value: AccountIdentity | undefined } | undefined;
+
+/**
+ * The Google account `agy` last signed in as.
+ *
+ * Antigravity keeps its refresh token in the OS keychain (service "gemini")
+ * and writes no account file, so the only place the identity is on disk is
+ * its own per-process log: `log/cli-<yyyymmdd_hhmmss>.log`, which carries
+ * `OAuth: authenticated successfully as <email>` on every start (verified on
+ * agy 1.2.13). The newest log that has the line wins.
+ *
+ * ponytail: "last successful sign-in" is not "signed in now" — a later logout
+ * is not detected. Logs are the only source; upgrade if agy ever writes an
+ * account file.
+ */
+export function readAntigravityAccount(logDir: string): AccountIdentity | undefined {
+  let names: string[];
+  try {
+    names = readdirSync(logDir)
+      .filter((n) => /^cli-\d{8}_\d{6}\.log$/.test(n))
+      .sort()
+      .reverse();
+  } catch {
+    return undefined;
+  }
+  const newest = names[0];
+  if (!newest) return undefined;
+  let mtimeMs = 0;
+  try {
+    mtimeMs = statSync(join(logDir, newest)).mtimeMs;
+  } catch {
+    // raced a rotation; read anyway
+  }
+  if (agyAccountCache?.newest === newest && agyAccountCache.mtimeMs === mtimeMs) return agyAccountCache.value;
+
+  let value: AccountIdentity | undefined;
+  for (const name of names.slice(0, 50)) {
+    let raw: string;
+    try {
+      raw = readFileSync(join(logDir, name), 'utf8');
+    } catch {
+      continue;
+    }
+    const email = [...raw.matchAll(AGY_AUTH_LINE)].at(-1)?.[1];
+    if (email) {
+      value = googleIdentity(email.replace(/[.,;]+$/, ''));
+      break;
+    }
+  }
+  agyAccountCache = { newest, mtimeMs, value };
+  return value;
 }

@@ -4,6 +4,9 @@ export { Collector, buildAdapters, listTranscripts, VERSION } from './daemon.js'
 export { ClaudeCodeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';
 export { OpenCodeAdapter } from './adapters/opencode.js';
+export { AntigravityAdapter } from './adapters/antigravity.js';
+export { GeminiCliAdapter } from './adapters/gemini.js';
+export { KimiCodeAdapter } from './adapters/kimi.js';
 export { readClaudeAccount, readOpenCodeAccounts } from './adapters/account.js';
 export type {
   AccountIdentity,

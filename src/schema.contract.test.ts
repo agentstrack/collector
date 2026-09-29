@@ -7,8 +7,12 @@ import { EVENT_TYPES, AGENTS, PRIVACY_MODES, SCHEMA_VERSION, EventEnvelope } fro
 import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { OpenCodeAdapter } from './adapters/opencode.js';
+import { AntigravityAdapter } from './adapters/antigravity.js';
+import { GeminiCliAdapter } from './adapters/gemini.js';
+import { KimiCodeAdapter } from './adapters/kimi.js';
 import type { NormalizedEvent } from './adapters/types.js';
 import { seedOpenCodeFixture } from '../test/fixtures/opencode-db.js';
+import { seedAntigravityFixture } from '../test/fixtures/antigravity-db.js';
 
 /**
  * Contract test.
@@ -39,7 +43,7 @@ const collectorId = '00000000-0000-4000-8000-000000000000';
 const fixture = (name: string) =>
   readFileSync(join(import.meta.dirname, '../test/fixtures', name), 'utf8').split('\n').filter(Boolean);
 
-/** Everything the three adapters produce from their fixtures, as wire envelopes. */
+/** Everything the adapters produce from their fixtures, as wire envelopes. */
 async function fixtureEnvelopes(): Promise<Record<string, unknown>[]> {
   const events: NormalizedEvent[] = [];
   const ctx = { collectorId, sourceFile: '/tmp/f.jsonl' };
@@ -52,17 +56,24 @@ async function fixtureEnvelopes(): Promise<Record<string, unknown>[]> {
   const codex = new CodexAdapter();
   for (const line of fixture('codex-session.jsonl')) events.push(...codex.normalize(line, ctx));
 
+  const fixtures = join(import.meta.dirname, '../test/fixtures');
+  const gemini = join(fixtures, 'gemini-home/tmp/myproj/chats/session-2026-09-24T08-53-9e000000.jsonl');
+  for (const line of readFileSync(gemini, 'utf8').split('\n')) {
+    events.push(...new GeminiCliAdapter(join(fixtures, 'gemini-home')).normalize(line, { collectorId, sourceFile: gemini }));
+  }
+  const kimi = join(fixtures, 'kimi-home/sessions/aaec326b87de6c65cbc919cff0fa048e/4b000000-0000-4000-8000-0000000000c1/wire.jsonl');
+  const kimiAdapter = new KimiCodeAdapter(join(fixtures, 'kimi-home'));
+  for (const line of readFileSync(kimi, 'utf8').split('\n')) {
+    events.push(...kimiAdapter.normalize(line, { collectorId, sourceFile: kimi }));
+  }
+
   const dir = mkdtempSync(join(tmpdir(), 'agentstrack-contract-'));
   try {
     seedOpenCodeFixture(dir);
+    seedAntigravityFixture(dir);
     const store = new Map<string, string>();
-    events.push(
-      ...(await new OpenCodeAdapter(dir).poll({
-        collectorId,
-        getMeta: (k) => store.get(k) ?? null,
-        setMeta: (k, v) => void store.set(k, v),
-      })),
-    );
+    const ctx = { collectorId, getMeta: (k: string) => store.get(k) ?? null, setMeta: (k: string, v: string) => void store.set(k, v) };
+    events.push(...(await new OpenCodeAdapter(dir).poll(ctx)), ...(await new AntigravityAdapter(dir, 3650).poll(ctx)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

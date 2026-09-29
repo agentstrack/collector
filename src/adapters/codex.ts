@@ -1,7 +1,10 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent } from './types.js';
+import type {
+  AccountIdentity, AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent,
+} from './types.js';
+import { readCodexAccount } from './account.js';
 import { newestJsonl, num, readHeadLines, safeJsonParse, str } from './types.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
@@ -47,6 +50,11 @@ export class CodexAdapter implements AgentAdapter {
     // session_meta carries cli_version — report the real version rather than
     // leaving it null and making every Codex install look unidentifiable.
     return { installed: true, version: readCliVersion(), watchPaths: [SESSIONS_DIR] };
+  }
+
+  /** The ChatGPT login in auth.json; undefined for API-key logins. See readCodexAccount. */
+  account(): AccountIdentity | undefined {
+    return readCodexAccount(CODEX_DIR);
   }
 
   async health(): Promise<HealthStatus> {

@@ -4,7 +4,7 @@ import {
   EXIT_UPDATED, compareVersions, installVersion, latestVersion, selfUpdatable,
 } from './update.js';
 import { appendFileSync, renameSync, statSync } from 'node:fs';
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadConfig, saveConfig, SPOOL_PATH, LOG_PATH, type Config } from './config.js';
 import { Spool } from './queue/spool.js';
@@ -16,6 +16,9 @@ import { ApiClient, ApiError, backoffMs, VERSION, type BatchResult, type ServerC
 import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { OpenCodeAdapter } from './adapters/opencode.js';
+import { AntigravityAdapter } from './adapters/antigravity.js';
+import { GeminiCliAdapter } from './adapters/gemini.js';
+import { KimiCodeAdapter } from './adapters/kimi.js';
 import type { AccountIdentity, AgentAdapter, NormalizedEvent } from './adapters/types.js';
 import { applyPrivacy } from './privacy/pipeline.js';
 import { compileRules, type RedactionRule } from './privacy/redact.js';
@@ -44,12 +47,15 @@ export function log(message: string): void {
 }
 
 export function buildAdapters(config: Config): AgentAdapter[] {
-  // OpenCode reads a database, not files, so max_age_days reaches it through
-  // its constructor rather than through the transcript walk.
+  // OpenCode and Antigravity read databases, not files, so max_age_days
+  // reaches them through their constructors rather than the transcript walk.
   const all: AgentAdapter[] = [
     new ClaudeCodeAdapter(),
     new CodexAdapter(),
     new OpenCodeAdapter(undefined, config.tracking.max_age_days),
+    new AntigravityAdapter(undefined, config.tracking.max_age_days),
+    new GeminiCliAdapter(),
+    new KimiCodeAdapter(),
   ];
   return all.filter((a) => config.tracking.agents.includes(a.id));
 }
@@ -83,8 +89,20 @@ export function listTranscripts(dir: string, maxAgeDays = 7): string[] {
   const cutoff = Date.now() - maxAgeDays * 86_400_000;
   const found: { path: string; mtime: number }[] = [];
 
+  // Every directory is visited once, by its real path. ~/.claude/projects
+  // has been seen holding a `projects -> .` symlink, which made the walk
+  // re-read every transcript under up to five aliases (one per depth level).
+  const visited = new Set<string>();
   const walk = (current: string, depth: number) => {
     if (depth > 5 || !existsSync(current)) return;
+    let real: string;
+    try {
+      real = realpathSync(current);
+    } catch {
+      return;
+    }
+    if (visited.has(real)) return;
+    visited.add(real);
     let entries: string[];
     try {
       entries = readdirSync(current);

@@ -1,0 +1,1 @@
+{"timestamp": 1790244007.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 100, "output": 10, "input_cache_read": 0, "input_cache_creation": 0}}}}

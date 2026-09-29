@@ -53,7 +53,7 @@ Every event, from every adapter, has exactly this shape.
 | `occurred_at` | ISO-8601 with offset | ✅ | Taken from the agent's own log line — when it happened, not when it uploaded. |
 | `collector_id` | UUID | ✅ | Assigned by the server at registration. Identifies the machine. |
 | `session_id` | string (1–200) | ✅ | The **agent-native** session id, stable for the session's lifetime. |
-| `agent` | enum | ✅ | `claude_code` · `codex` · `gemini_cli` · `opencode` · `cursor` · `cline` · `copilot_cli` · `other` |
+| `agent` | enum | ✅ | `claude_code` · `codex` · `gemini_cli` · `opencode` · `cursor` · `cline` · `copilot_cli` · `antigravity` · `kimi_code` · `other` |
 | `agent_version` | string (≤50) | — | As reported by the agent in its own log. |
 | `event_type` | enum | ✅ | One of the 18 below. |
 | `payload` | object | ✅ | Defaults to `{}`. Shape depends on `event_type`. |

@@ -14,7 +14,9 @@ import { z } from 'zod';
  */
 export const SCHEMA_VERSION = 1;
 
-export const AGENTS = ['claude_code', 'codex', 'gemini_cli', 'opencode', 'cursor', 'cline', 'copilot_cli', 'other'] as const;
+export const AGENTS = [
+  'claude_code', 'codex', 'gemini_cli', 'opencode', 'cursor', 'cline', 'copilot_cli', 'antigravity', 'kimi_code', 'other',
+] as const;
 export type AgentId = (typeof AGENTS)[number];
 
 export const EVENT_TYPES = [

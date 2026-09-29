@@ -10,6 +10,39 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-29
+
+### Added
+
+- **Antigravity CLI adapter** (`antigravity`, new agent id). Reads agy's per-conversation SQLite
+  databases under `~/.gemini/antigravity-cli/conversations/`, decoding the protobuf step blobs with
+  field numbers taken from the descriptors in the agy 1.2.13 binary: prompts, per-call token usage
+  (input, cache read/write, output, thinking), tool calls with durations, commands, file reads and
+  line-counted edits, workspace and branch. A changed conversation is copied to a private temp dir
+  and read there, so the live database is never opened. Account from agy's sign-in log line.
+- **Gemini CLI adapter** (`gemini_cli`). Tails `~/.gemini/tmp/<project>/chats/session-*.jsonl`
+  (0.61 format): prompts, per-response tokens, terminal tool calls, commands and file effects.
+  Re-appended and `$set`-rewritten messages are keyed on their ids, so nothing is billed twice.
+- **Kimi Code adapter** (`kimi_code`, new agent id), **opt-in and experimental**: written from the
+  kimi-cli 1.52 source, not yet verified against real sessions. Add `kimi_code` to
+  `tracking.agents` to enable it.
+- **Codex sessions carry an account.** `~/.codex/auth.json`'s `tokens.account_id` is the key; email
+  and plan come from the id_token's decoded payload. No token is kept or sent.
+
+### Changed
+
+- `tracking.agents` defaults to `[claude_code, codex, opencode, antigravity, gemini_cli]` for new
+  installs. `login` writes the full config, so an existing `config.yaml` keeps the list it has —
+  add `antigravity` / `gemini_cli` there to enable them.
+- The event envelope's `agent` enum gains `antigravity` and `kimi_code`; the server must accept them
+  before a collector that sends them.
+
+### Fixed
+
+- **A symlink loop no longer multiplies the transcript walk.** A `~/.claude/projects/projects -> .`
+  link made every transcript be found under up to five aliases; directories are now walked once by
+  their real path.
+
 ## [0.4.6] — 2026-09-25
 
 ### Fixed
@@ -506,7 +539,9 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/agentstrack/collector/compare/v0.4.6...v0.5.0
+[0.4.6]: https://github.com/agentstrack/collector/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/agentstrack/collector/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/agentstrack/collector/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/agentstrack/collector/compare/v0.4.2...v0.4.3

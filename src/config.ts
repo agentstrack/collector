@@ -85,7 +85,9 @@ export const Config = z.object({
       idle_timeout_seconds: z.number().int().min(30).max(3600).default(120),
       git_metadata: z.boolean().default(true),
       process_metrics: z.boolean().default(true),
-      agents: z.array(z.string()).default(['claude_code', 'codex', 'opencode']),
+      // kimi_code is opt-in: its adapter was written from upstream source and
+      // has not yet been checked against a real session.
+      agents: z.array(z.string()).default(['claude_code', 'codex', 'opencode', 'antigravity', 'gemini_cli']),
     })
     .prefault({}),
 
