@@ -10,6 +10,8 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-31
+
 ### Added
 
 - `agentstrack summary [--days N] [--json]`: your own recent totals from AgentsTrack (sessions,
@@ -553,7 +555,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/agentstrack/collector/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/agentstrack/collector/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/agentstrack/collector/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/agentstrack/collector/compare/v0.4.4...v0.4.5
