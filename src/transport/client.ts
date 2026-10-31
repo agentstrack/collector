@@ -47,6 +47,8 @@ export interface ServerConfig {
   redaction_rules: { pattern: string; replacement: string }[];
   max_batch_events: number;
   batch_interval_seconds: number;
+  /** Every event type the server accepts. Absent on servers older than the field. */
+  event_types?: string[];
 }
 
 export class ApiError extends Error {

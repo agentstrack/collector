@@ -70,6 +70,14 @@ export function buildAdapters(config: Config): AgentAdapter[] {
 const ACCOUNT_EVENTS = new Set(['session.started', 'user.prompted']);
 
 /**
+ * Event types newer than the servers this collector may talk to. Each is sent
+ * only when GET /v1/collector/config lists it in `event_types`: a batch the
+ * server rejects in full pauses the whole upload (`reason: 'schema'`), so an
+ * older backend must never be handed one. Unknown config means "not listed".
+ */
+export const GATED_EVENT_TYPES = new Set(['rate_limit.reported']);
+
+/**
  * Whether this event may carry account attribution.
  *
  * The honest half is the timestamp. ~/.claude.json and account.json record who
@@ -578,6 +586,9 @@ export class Collector {
     const envelopes: EventEnvelope[] = [];
 
     for (const item of items) {
+      const type = item.event.event_type;
+      if (GATED_EVENT_TYPES.has(type) && !this.serverConfig?.event_types?.includes(type)) continue;
+
       const cwd = item.cwd;
       // An excluded project never produces an event at all.
       if (cwd && isExcluded(cwd, this.config.privacy.excluded_projects)) continue;

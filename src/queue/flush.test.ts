@@ -200,3 +200,26 @@ describe('idle session.ended', () => {
     expect(ended[0]!.event_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 });
+
+describe('event types the server has not announced', () => {
+  it('drops rate_limit.reported until the server lists it in event_types', () => {
+    const { spool, collector } = setup(0, 1, async () => ok(0));
+    const item = () => ({
+      event: {
+        ...event(),
+        event_type: 'rate_limit.reported' as const,
+        payload: { source: 'codex', windows: [{ window_minutes: 300, used_percent: 5 }] },
+      },
+      eventId: randomUUID(),
+    });
+    // @ts-expect-error private — an older server: no event_types at all
+    collector.serverConfig = { privacy_mode: 'analytics', redaction_rules: [] };
+    // @ts-expect-error private
+    expect(collector.enqueue([item()], 'c1')).toBe(0);
+    // @ts-expect-error private
+    collector.serverConfig = { privacy_mode: 'analytics', redaction_rules: [], event_types: ['rate_limit.reported'] };
+    // @ts-expect-error private
+    expect(collector.enqueue([item()], 'c1')).toBe(1);
+    expect(spool.depth()).toBe(1);
+  });
+});
