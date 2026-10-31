@@ -10,6 +10,14 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `agentstrack summary [--days N] [--json]`: your own recent totals from AgentsTrack (sessions,
+  tokens, cost with its basis, per-agent and per-day), for widgets and scripts. The API key stays
+  inside the collector; callers only see the totals. Needs a server with `GET /v1/collector/summary`;
+  an older server answers `{"error":"unsupported_server"}` with exit code 2.
+- `status --json` now includes `upload_paused_reason` (null when uploads are running).
+
 ### Changed
 
 - **Requires Node 24 or newer** (`engines.node >= 24`, was `>= 22`). Node 22 is no longer tested or

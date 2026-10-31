@@ -108,6 +108,15 @@ export class ApiClient {
     return this.request('POST', '/v1/collector/health', input);
   }
 
+  /**
+   * The key owner's own recent totals (1–30 days). The only read a collector
+   * key is allowed; the shape is passed through untouched so a server-side
+   * field addition reaches `agentstrack summary --json` without a release.
+   */
+  async summary(days: number): Promise<unknown> {
+    return this.request('GET', `/v1/collector/summary?days=${Math.trunc(days)}`);
+  }
+
   private async request<T>(method: string, path: string, body?: unknown, compress = false): Promise<T> {
     const url = `${this.options.apiUrl.replace(/\/$/, '')}${path}`;
     const headers: Record<string, string> = {
