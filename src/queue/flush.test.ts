@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -221,5 +221,32 @@ describe('event types the server has not announced', () => {
     // @ts-expect-error private
     expect(collector.enqueue([item()], 'c1')).toBe(1);
     expect(spool.depth()).toBe(1);
+  });
+});
+
+describe('Open Island plan windows', () => {
+  it('attach to the newest Claude session once per file change and never count as activity', () => {
+    const { spool, collector } = setup(0, 1, async () => ok(0));
+    const dir = mkdtempSync(join(tmpdir(), 'agentstrack-oi-'));
+    dirs.push(dir);
+    const path = join(dir, 'rl.json');
+    writeFileSync(path, '{"five_hour":{"used_percentage":29}}');
+    // @ts-expect-error private
+    collector.serverConfig = { privacy_mode: 'analytics', redaction_rules: [], event_types: ['rate_limit.reported'] };
+    // @ts-expect-error private
+    collector.openSessions.set('claude_code::old', { agent: 'claude_code', sessionId: 'old', lastAtMs: 1 });
+    // @ts-expect-error private
+    collector.openSessions.set('claude_code::new', { agent: 'claude_code', sessionId: 'new', lastAtMs: 2 });
+    // @ts-expect-error private
+    collector.openSessions.set('codex::x', { agent: 'codex', sessionId: 'x', lastAtMs: 3 });
+
+    // @ts-expect-error private
+    expect(collector.reportOpenIslandRateLimits(path)).toBe(1);
+    // @ts-expect-error private
+    expect(collector.reportOpenIslandRateLimits(path)).toBe(0); // unchanged file
+    const [sent] = spool.peek(10);
+    expect(sent!.event).toMatchObject({ session_id: 'new', event_type: 'rate_limit.reported', payload: { source: 'open_island' } });
+    // @ts-expect-error private — the reading did not move the session's last activity
+    expect(collector.openSessions.get('claude_code::new').lastAtMs).toBe(2);
   });
 });
