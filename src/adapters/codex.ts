@@ -42,6 +42,8 @@ export class CodexAdapter implements AgentAdapter {
 
   /** Session id and model carry across lines within one rollout file. */
   private readonly fileState = new Map<string, FileState>();
+  /** Session id → the rate-limit windows last emitted, so an unchanged snapshot is not re-sent. */
+  private readonly lastRateLimits = new Map<string, string>();
 
   async detect(): Promise<DetectionResult> {
     if (!existsSync(SESSIONS_DIR)) {
@@ -138,7 +140,7 @@ export class CodexAdapter implements AgentAdapter {
   ): NormalizedEvent[] {
     const kind = str(payload['type']);
 
-    if (kind === 'token_count') return this.tokenCountUsage(state, occurredAt, payload);
+    if (kind === 'token_count') return [...this.tokenCountUsage(state, occurredAt, payload), ...this.tokenCountRateLimits(state, occurredAt, payload)];
 
     if (kind === 'user_message') {
       const message = str(payload['message']) ?? '';
@@ -289,6 +291,31 @@ export class CodexAdapter implements AgentAdapter {
       repo: state.cwd ? { project_path: state.cwd } : undefined,
     };
   }
+
+  /**
+   * The plan-window half of a `token_count` line, as `rate_limit.reported`.
+   * Codex repeats the same snapshot on every turn and each event counts
+   * against the org's ingest quota, so only a change is emitted.
+   */
+  private tokenCountRateLimits(
+    state: FileState,
+    occurredAt: string,
+    payload: Record<string, unknown>,
+  ): NormalizedEvent[] {
+    const rateLimits = (payload['rate_limits'] ?? {}) as Record<string, unknown>;
+    const windows = readCodexRateLimits(rateLimits);
+    if (windows.length === 0 || !state.sessionId) return [];
+    const key = JSON.stringify(windows);
+    if (this.lastRateLimits.get(state.sessionId) === key) return [];
+    this.lastRateLimits.set(state.sessionId, key);
+    return [
+      this.wrap(state, occurredAt, 'rate_limit.reported', {
+        source: 'codex',
+        windows,
+        plan_type: str(rateLimits['plan_type']),
+      }),
+    ];
+  }
 }
 
 interface FileState {
@@ -323,6 +350,42 @@ function readCliVersion(): string | undefined {
     // Unreadable rollout tree: absent is better than fabricated.
   }
   return undefined;
+}
+
+export interface RateWindow {
+  window_minutes: number;
+  used_percent: number;
+  resets_at?: string;
+}
+
+/**
+ * Codex's `rate_limits.primary` / `.secondary` as plan windows.
+ *
+ * Keyed by `window_minutes`, never by name: real rollouts carry the 7-day
+ * window as `primary` with `secondary: null` on some plans. Only the window
+ * figures travel — the sibling `credits` block (a balance) is never read.
+ * A malformed window is skipped, not guessed at.
+ */
+export function readCodexRateLimits(rateLimits: Record<string, unknown>): RateWindow[] {
+  const windows: RateWindow[] = [];
+  for (const name of ['primary', 'secondary']) {
+    const w = rateLimits[name];
+    if (!w || typeof w !== 'object') continue;
+    const r = w as Record<string, unknown>;
+    const minutes = r['window_minutes'];
+    const used = r['used_percent'];
+    if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 1 || minutes > 44_640) continue;
+    if (typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 100) continue;
+    // Epoch seconds. Bounded so a corrupt value cannot make toISOString throw.
+    const resets = r['resets_at'];
+    const resetsOk = typeof resets === 'number' && resets > 0 && resets < 1e11;
+    windows.push({
+      window_minutes: minutes,
+      used_percent: used,
+      ...(resetsOk ? { resets_at: new Date(resets * 1000).toISOString() } : {}),
+    });
+  }
+  return windows;
 }
 
 /**
