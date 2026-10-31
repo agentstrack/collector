@@ -78,7 +78,7 @@ Nothing showing up? Run `agentstrack doctor`.
 
 | ✅ It collects | ❌ It never does |
 |---|---|
-| Session ids, agent name and version, event timestamps | Read your source tree, or open any file other than agent transcripts |
+| Session ids, agent name and version, event timestamps | Read your source tree, or open any file other than agent transcripts — and, only if you opt in with `tracking.open_island_rate_limits`, Open Island's `/tmp/open-island-rl.json` |
 | Token counts: input, cached input, cache creation, output, reasoning | Upload prompt text — unless you explicitly set `privacy.mode: full` |
 | Model id, provider, stop reason | Upload file contents or diffs — unless you explicitly set `privacy.code_content: full` |
 | Tool names, tool call ids, success/failure | Send tool output or command output |
@@ -89,6 +89,7 @@ Nothing showing up? Run `agentstrack doctor`.
 | A session title — the first line of the prompt, secret-redacted and then capped at 120 chars (`analytics` mode and above) | Send the rest of the prompt those titles were taken from |
 | Your hostname, OS and release, arch, Node version, a coarse machine kind (`workstation` / `server` / `container` / `ci`) and each detected agent's version — at registration and with each health report | Show your hostname or IP address in the product — see [Machine info](#machine-info) |
 | That local redaction fired: which pattern matched and how many times (`secrets_redacted`), in every privacy mode | Send the secret it matched — not the text, not a prefix of it, not a hash of it, not the characters around it |
+| Plan headroom: the used % and reset time of your plan's rate-limit windows, as Codex reports them (Claude Code only via the Open Island opt-in) | Send Codex's credit balance |
 | Which skill, sub-agent type or workflow a Claude Code session invoked, and which events came from a sub-agent | Copy the `Agent` call's prompt or a workflow script's body out of the call (a sub-agent transcript's own opening prompt follows `privacy.prompts` like any other prompt) |
 | | Install hooks or modify `~/.claude/settings.json` / `~/.codex/hooks.json` |
 | | Send `organization_id` or `user_id` — they are not in the wire format at all |
@@ -526,6 +527,7 @@ tracking:
   idle_timeout_seconds: 120
   git_metadata: true
   process_metrics: true
+  open_island_rate_limits: false
   agents:
     - claude_code
     - codex
@@ -621,6 +623,11 @@ tracking:
 
   # Not implemented yet — see "Roadmap".
   process_metrics: true
+
+  # Read Claude Code's 5h/7d plan windows from Open Island's
+  # /tmp/open-island-rl.json. Off by default; refused if the file is a symlink,
+  # not owned by you or over 4 KB. Read only — nothing is written.
+  open_island_rate_limits: false
 
   # Which adapters to run. Removing one stops it being read entirely.
   agents:
