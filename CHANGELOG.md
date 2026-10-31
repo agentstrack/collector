@@ -10,6 +10,18 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Privacy (B1): excluded projects no longer leak commits.** A `git.commit` event (repository root,
+  commit SHA, diffstat) was uploaded for commits made in a project listed under
+  `privacy.excluded_projects`. Two paths did this: a session whose working directory was excluded
+  still armed its repository for commit reporting, and in a monorepo an excluded subfolder shared
+  its root with an allowed project, so commits touching that subfolder were reported. Both are fixed:
+  excluded working directories are ignored, and any commit touching an excluded path is dropped. A
+  commit whose changed files cannot be listed is also dropped, so the check fails closed. Commits
+  whose files are all outside the exclusion list are reported as before. If you exclude a project,
+  update to this release; commits already uploaded are not recalled by this change.
+
 ### Security
 
 - `zod` 4.4.3 → 4.6.7 (lockfile only, within the existing `^4.4.3` range): fixes
