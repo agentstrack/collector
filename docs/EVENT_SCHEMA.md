@@ -73,20 +73,20 @@ this column is what the adapters in this repository actually produce.
 |---|---|---|---|---|
 | `session.started` | — | ✅ | ✅ | `session_meta` line / `session` row |
 | `session.ended` | ✅ | ✅ | ✅ | daemon idle timeout (`reason: timeout`, `unknown` on shutdown) / `session.time_archived` or `time_compacting` |
-| `user.prompted` | ✅ | ✅ | ✅ | `user` line / `user_message` / `text` part of a user message |
+| `user.prompted` | ✅ | ✅ | ✅ | `user` line / `user_message`, or a `UserMessage` item on Codex ≥0.15x / `text` part of a user message |
 | `agent.turn.started` | — | ✅ | — | `turn_context` |
-| `agent.turn.ended` | — | ✅ | — | `task_complete` |
+| `agent.turn.ended` | — | ✅ | — | `task_complete`, `turn_aborted` (`aborted: true`) |
 | `model.request` | — | — | — | not emitted in 0.1.0 |
 | `model.response` | ✅ | — | — | `assistant` line with `usage` |
 | `tool.started` | ✅ | ✅ | — | `tool_use` / `function_call`, `custom_tool_call` |
-| `tool.completed` | ✅ | ✅ | ✅ | `tool_result` / `*_output` / `tool` part, `status: completed` |
+| `tool.completed` | ✅ | ✅ | ✅ | `tool_result` / `*_output`, `McpToolCall` item / `tool` part, `status: completed` |
 | `tool.failed` | ✅ | ✅ | ✅ | `is_error` / `exec_command_end` exit code, `Exit code: N` output header / `status: error` |
 | `file.read` | ✅ | ✅ | ✅ | `Read` tool / pager & `cat`-family commands / `read` tool part |
-| `file.changed` | ✅ | ✅ | ✅ | `Edit`/`Write` input / `apply_patch` body / `edit` & `write` tool parts |
-| `command.executed` | ✅ | ✅ | ✅ | `Bash` tool input / `exec_command_end` / `bash` tool part |
+| `file.changed` | ✅ | ✅ | ✅ | `Edit`/`Write` input / `apply_patch` body or `FileChange` item / `edit` & `write` tool parts |
+| `command.executed` | ✅ | ✅ | ✅ | `Bash` tool input / `exec_command_end` or `CommandExecution` item / `bash` tool part |
 | `git.commit` | ✅ | ✅ | ✅ | `git log` in repos a session touched — not from the transcript |
 | `git.branch_changed` | — | — | — | not emitted in 0.1.0 |
-| `usage.reported` | — | ✅ | ✅ | `token_count` / `session` row totals — always `cumulative: true` |
+| `usage.reported` | — | ✅ | ✅ | `token_usage_record` per response (`cumulative: false`), or `token_count` totals on older Codex / `session` row totals (`cumulative: true`) |
 | `error` | — | ✅ | — | `error` / `stream_error` |
 | `heartbeat` | — | — | — | not emitted in 0.1.0 |
 
@@ -215,7 +215,7 @@ session's working directory.
 | `model` | string | Model the session opened with. |
 | `provider` | string | Provider the session ran on, when the agent records one. |
 | `agent_mode` | string | The agent's own mode label — OpenCode's `build` / `plan`. |
-| `parent_session_id` | string | Set on a sub-agent session (OpenCode's `task` tool). |
+| `parent_session_id` | string | Set on a sub-agent session (OpenCode's `task` tool) and on a forked or multi-agent v2 Codex thread (`session_meta.history_base.thread_id`). |
 | `derived_title` | string | Same privacy rules as on `user.prompted`. OpenCode names its own sessions, so this one is whatever OpenCode already truncated it to; it is redacted by the pipeline, but any truncation upstream of us is outside our control. |
 | `account` | `Account` | See below. |
 | `repo` | `RepoContext` | |
@@ -255,7 +255,9 @@ The event where privacy mode is most visible.
 |---|---|---|
 | `turn_id` | string | |
 | `model` | string | `started` only. The model the turn opened with, when the agent states it — Codex's `turn_context`. |
-| `duration_ms` | int ≥ 0 | `ended` only. Not populated in 0.1.0. |
+| `duration_ms` | int ≥ 0 | `ended` only. Codex ≥0.15x (`task_complete` / `turn_aborted`). |
+| `aborted` | `true` | `ended` only. The turn was interrupted or replaced (Codex `turn_aborted`). |
+| `abort_reason` | string | `ended` only, with `aborted`. Codex's own reason enum, e.g. `interrupted`. |
 
 ### Model traffic
 
@@ -290,7 +292,7 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 | `usage` | `TokenUsage` ✅ | |
 | `model` | string | |
 | `provider` | string | |
-| `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** Codex and OpenCode always emit `true`. Known limit: the total is session-wide but tagged with the *current* model, and the server gauges per model, so a session that switches model mid-way (`/model`) has its whole total counted under both. Codex's per-turn `last_token_usage` was measured against real rollouts and does not reconcile to the final total (duplicate snapshots, resets), so the gauge stays. |
+| `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** OpenCode always emits `true`. Codex emits `false` from ≥0.15x, one event per `token_usage_record` (deduplicated on `response_id`); per-response usage was checked against real rollouts and sums exactly to the thread total, is tagged with the model that served it, and excludes the parent history a forked or multi-agent child thread inherits. Older Codex rollouts (no `token_usage_record`) keep the `token_count` gauge, with its known limit: the total is session-wide but tagged with the *current* model, so a session that switches model mid-way has its whole total counted under both. |
 | `reported_cost_usd` | number ≥ 0 | Only when the agent exposes a cost. Drives `basis: REPORTED` rather than `ESTIMATED`. OpenCode's `session.cost` is a real settled provider charge and lands here. |
 | `plan_type` | string | Subscription plan where known — a subscription "cost" is always an API-equivalent estimate and is labelled as such. |
 
