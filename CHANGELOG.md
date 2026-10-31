@@ -10,6 +10,14 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Codex MCP tool calls (`McpToolCall` items, which have no tool-call line of their own) are reported
+  as `mcp__<server>__<tool>` tool events with their duration.
+- Codex turns carry `duration_ms`, and an interrupted turn ends with `aborted: true` and Codex's
+  reason (`turn_aborted`).
+- A forked or multi-agent Codex thread's `session.started` carries `parent_session_id`.
+
 ### Fixed
 
 - **Privacy (B1): excluded projects no longer leak commits.** A `git.commit` event (repository root,
@@ -21,6 +29,17 @@ released as a major version, with a migration note in this file.
   commit whose changed files cannot be listed is also dropped, so the check fails closed. Commits
   whose files are all outside the exclusion list are reported as before. If you exclude a project,
   update to this release; commits already uploaded are not recalled by this change.
+
+- **Codex 0.15x and newer: prompts, commands and file edits are collected again.** These builds
+  stopped writing `user_message` and `exec_command_end`. Prompts, commands and edits now come from
+  the `item_completed` items (`UserMessage`, `CommandExecution`, `FileChange`), so these sessions no
+  longer show zero prompts. Edit line counts are computed locally; file bodies never enter an event.
+- **Codex token accounting is per response.** Newer rollouts write a `token_usage_record` per model
+  response. Each one is billed once (deduplicated on `response_id`) under the model that served it,
+  instead of the session-wide running total. This fixes two double counts: a mid-session model switch
+  counting the whole total under both models, and a forked or multi-agent child thread re-billing the
+  parent history it starts from. Older rollouts keep the running-total gauge. Sessions already
+  ingested are not rewritten.
 
 ### Security
 
