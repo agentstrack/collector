@@ -10,6 +10,14 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Security
+
+- `zod` 4.4.3 → 4.6.7 (lockfile only, within the existing `^4.4.3` range): fixes
+  [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5), memory exhaustion while
+  validating oversized constrained collections. `zod` validates the config file and server
+  responses, so this is a runtime dependency. Dev-only: `source-map-js` 1.2.1 → 1.2.2
+  ([GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q)).
+
 ## [0.6.0] — 2026-10-31
 
 ### Added
