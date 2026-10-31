@@ -391,6 +391,10 @@ privacy:
 Prefix match on the session's working directory, `~` expands. An excluded project produces **no
 events at all** — not even counts. Edit the YAML and restart the collector.
 
+Commit reporting follows the same rule. A commit is not reported if any file it changes is under an
+excluded path, so a monorepo subfolder on the list keeps its commits out of the feed even when
+another project in the same repository is tracked.
+
 ---
 
 ## Commands
