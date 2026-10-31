@@ -138,21 +138,7 @@ export class CodexAdapter implements AgentAdapter {
   ): NormalizedEvent[] {
     const kind = str(payload['type']);
 
-    if (kind === 'token_count') {
-      const info = (payload['info'] ?? {}) as Record<string, unknown>;
-      const rateLimits = (payload['rate_limits'] ?? {}) as Record<string, unknown>;
-      const planType = str(rateLimits['plan_type']);
-      return [
-        this.wrap(state, occurredAt, 'usage.reported', {
-          model: state.model,
-          provider: 'openai',
-          usage: readCodexUsage(info['total_token_usage']),
-          // Running totals: the server takes the max rather than summing.
-          cumulative: true,
-          plan_type: planType,
-        }),
-      ];
-    }
+    if (kind === 'token_count') return this.tokenCountUsage(state, occurredAt, payload);
 
     if (kind === 'user_message') {
       const message = str(payload['message']) ?? '';
@@ -209,6 +195,27 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     return [];
+  }
+
+  /** The usage half of a `token_count` line: the session's running total as a gauge. */
+  private tokenCountUsage(
+    state: FileState,
+    occurredAt: string,
+    payload: Record<string, unknown>,
+  ): NormalizedEvent[] {
+    const info = (payload['info'] ?? {}) as Record<string, unknown>;
+    const rateLimits = (payload['rate_limits'] ?? {}) as Record<string, unknown>;
+    const planType = str(rateLimits['plan_type']);
+    return [
+      this.wrap(state, occurredAt, 'usage.reported', {
+        model: state.model,
+        provider: 'openai',
+        usage: readCodexUsage(info['total_token_usage']),
+        // Running totals: the server takes the max rather than summing.
+        cumulative: true,
+        plan_type: planType,
+      }),
+    ];
   }
 
   private normalizeResponseItem(
