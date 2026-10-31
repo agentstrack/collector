@@ -147,7 +147,7 @@ before anything is uploaded and no later stage can recover them.
 | **`task_category`** | In the schema, never populated. Would be a local classifier over the prompt — and it must run locally and discard the prompt, exactly as `derived_title` does. |
 | **`duration_ms` on `agent.turn.ended`** | The field is defined and not populated. Codex logs turn boundaries, so this is arithmetic on two timestamps the adapter already sees. |
 | **`shell_arguments: full`** | Behaves identically to `redact_secrets` today, because redaction is applied to commands unconditionally. That is arguably correct — but the config offers a distinction it does not honour, which is the section 3 problem again. |
-| **Windows** | The service installer is launchd + systemd. `agentstrack start --foreground` works anywhere Node 20+ does, so the gap is specifically a Scheduled Task or service wrapper, plus path handling review. Wanted, and needs someone who runs Windows to own it. |
+| **Windows** | The service installer is launchd + systemd. `agentstrack start --foreground` works anywhere Node 24+ does, so the gap is specifically a Scheduled Task or service wrapper, plus path handling review. Wanted, and needs someone who runs Windows to own it. |
 
 ---
 

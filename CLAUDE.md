@@ -42,7 +42,7 @@ under the right name cannot be undone.
   `gh auth switch -u ddcodepl`, do the work, switch back. Git push is unaffected (SSH, not `gh`).
 - **`master` and `develop` both exist and both matter.** CI and CodeQL run on both; `master` is the
   default branch. Releases are cut from `master`.
-- **Node floor is 22** (`engines`, `.nvmrc`); CI tests 22 and 24, the release job runs 24.
+- **Node floor is 24** (`engines`); `.nvmrc` is 26 for development. CI tests 24 and 26, the release job and CodeQL run 26.
 - **npm's packument is CDN-cached for a minute or two after a publish.** `npm view` reporting the old
   version right after a successful publish is staleness, not failure — confirm with
   `curl -s https://registry.npmjs.org/@agentstrack%2Fcollector | jq '.["dist-tags"]'`.

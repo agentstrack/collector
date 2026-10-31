@@ -54,7 +54,7 @@ can reopen any of them; a preference cannot.
   under `src/privacy/`, `src/queue/`, `src/schema.ts`, and anything touching `.github/workflows/` or
   `package.json`. These are the trust story, the durability guarantees, the wire contract, and the
   paths that can publish to npm — see [CODEOWNERS](./.github/CODEOWNERS).
-- **CI green is not negotiable.** The full matrix — Node 20 and 22, Ubuntu and macOS — plus typecheck,
+- **CI green is not negotiable.** The full matrix — Node 24 and 26, Ubuntu and macOS — plus typecheck,
   tests and a build. A red cell blocks merge; a flaky test is a bug to fix, not a reason to re-run.
 - The [PR template](./.github/PULL_REQUEST_TEMPLATE.md)'s privacy question gets a real answer. It is
   not a formality.

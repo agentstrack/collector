@@ -88,8 +88,8 @@ body:
     id: node
     attributes:
       label: Node version
-      description: Output of `node --version`. The collector requires Node >= 20.
-      placeholder: "v22.11.0"
+      description: Output of `node --version`. The collector requires Node >= 24.
+      placeholder: "v26.13.0"
     validations:
       required: true
 

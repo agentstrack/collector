@@ -30,7 +30,7 @@ before anything is: [Verify it yourself](#verify-it-yourself).
 ## Quick start
 
 ```bash
-npm install -g @agentstrack/collector       # requires Node >= 22
+npm install -g @agentstrack/collector       # requires Node >= 24
 
 agentstrack login at_live_xxxxxxxx_xxxxxxxx  # key from Settings → API keys
 agentstrack start                            # installs a login service and starts collecting
@@ -858,7 +858,7 @@ means for each.
 - **Process metrics.** `tracking.process_metrics` is accepted and ignored.
 - **`heartbeat`, `model.request` and `git.branch_changed`** are in the schema but no adapter emits them yet. `session.ended` is not read from any Claude Code or Codex transcript either — the daemon emits it after `tracking.idle_timeout_seconds` of quiet (`reason: timeout`) or on shutdown (`reason: unknown`).
 - **Local task classification** (`task_category`) — the field exists in the schema; the collector only derives a title.
-- **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 22+ does.
+- **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 24+ does.
 - **`MultiEdit`.** The Claude Code adapter derives file changes from `Edit`, `Write`, `NotebookEdit` and `Read`; a `MultiEdit` call is still recorded as `tool.started`/`tool.completed`, but produces no `file.changed` events and no line counts.
 
 ---

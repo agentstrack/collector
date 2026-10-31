@@ -10,6 +10,12 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Requires Node 24 or newer** (`engines.node >= 24`, was `>= 22`). Node 22 is no longer tested or
+  supported; upgrade Node before updating the collector. Development, the release job and CodeQL run
+  on Node 26; CI tests 24 and 26.
+
 ## [0.5.0] — 2026-09-29
 
 ### Added

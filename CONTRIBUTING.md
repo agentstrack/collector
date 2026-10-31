@@ -10,7 +10,7 @@ Thanks for being here. The most valuable contributions to this repo, in order:
 
 ## Development setup
 
-CI runs Node **22** and **24** on Ubuntu and macOS; the published package declares `engines.node >= 22`.
+CI runs Node **24** and **26** on Ubuntu and macOS; the published package declares `engines.node >= 24`.
 
 ```bash
 git clone https://github.com/agentstrack/collector.git
@@ -287,7 +287,7 @@ commit only the scrubbed copy.
 | Spool / tailer change | A test using a real temp file and a real SQLite spool — these are the durability guarantees |
 | Bug fix | A test that fails on `main` and passes with the fix |
 
-Run `npm test && npm run typecheck` before pushing. CI runs both on Node 20 and 22, on Ubuntu and
+Run `npm test && npm run typecheck` before pushing. CI runs both on Node 24 and 26, on Ubuntu and
 macOS; a red matrix cell blocks merge.
 
 **Tests must never contain real credentials, real prompts, or real paths** — including strings that
