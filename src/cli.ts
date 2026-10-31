@@ -12,7 +12,7 @@ import {
   CONFIG_PATH, DEFAULT_API_URL, LOG_PATH, PID_PATH, SPOOL_PATH, loadConfig, saveConfig, Config, configExists,
 } from './config.js';
 import { Collector, VERSION, buildAdapters, errorMessage, listTranscripts, log } from './daemon.js';
-import { ApiClient } from './transport/client.js';
+import { ApiClient, ApiError } from './transport/client.js';
 import { Spool } from './queue/spool.js';
 import { installService, uninstallService, servicePath } from './commands/service.js';
 import { clampPrivacyMode } from './privacy/mode.js';
@@ -241,6 +241,7 @@ program
       const config = configExists() ? loadConfig() : null;
       const spool = new Spool(SPOOL_PATH);
       const depth = spool.depth();
+      const pausedReason = spool.getMeta('upload_paused_reason');
       spool.close();
       const agents = config
         ? await Promise.all(
@@ -257,6 +258,7 @@ program
             collector_id: config?.collector_id ?? null,
             privacy_mode: config?.privacy.mode ?? null,
             queue_depth: depth,
+            upload_paused_reason: pausedReason ?? null,
             running: isRunning(),
             service_installed: existsSync(servicePath()),
             agents,
@@ -297,6 +299,43 @@ program
       // "sessions" rather than "transcripts": OpenCode keeps rows in a database,
       // not one file per session, and the count means the same thing either way.
       console.log(`  ${mark} ${adapter.id.padEnd(14)} ${health.healthy ? `${health.filesTracked} sessions` : health.error ?? 'unavailable'}`);
+    }
+  });
+
+// ------------------------------------------------------------------ summary
+
+program
+  .command('summary')
+  .description("Your own recent totals from AgentsTrack (for widgets and scripts)")
+  .option('--days <n>', 'window in days, 1-30', '7')
+  .option('--json', 'machine-readable output')
+  .action(async (options: { days: string; json?: boolean }) => {
+    const config = configExists() ? loadConfig() : null;
+    if (!config?.api_key) {
+      if (options.json) console.log(JSON.stringify({ error: 'not_logged_in' }));
+      else console.error(pc.yellow('!') + ' Not logged in. Run: ' + pc.cyan('agentstrack login'));
+      process.exitCode = 1;
+      return;
+    }
+    const days = Math.min(Math.max(Number.parseInt(options.days, 10) || 7, 1), 30);
+    // The key stays in this process: callers get totals, never the credential.
+    const client = new ApiClient({ apiUrl: config.api_url, apiKey: config.api_key, timeoutMs: 15_000 });
+    try {
+      const summary = await client.summary(days);
+      if (options.json) {
+        console.log(JSON.stringify(summary));
+        return;
+      }
+      const t = (summary as { totals?: Record<string, number> }).totals ?? {};
+      console.log(pc.bold(`Last ${days} day${days === 1 ? '' : 's'}`));
+      console.log(`  Sessions:      ${t['sessions'] ?? 0}`);
+      console.log(`  Output tokens: ${(t['outputTokens'] ?? 0).toLocaleString()}`);
+      console.log(`  Cost:          $${(t['costUsd'] ?? 0).toFixed(2)} ${pc.dim('(see basis in --json; subscription cost is an API-equivalent estimate)')}`);
+    } catch (error) {
+      const status = error instanceof ApiError ? error.status : 0;
+      if (options.json) console.log(JSON.stringify({ error: status === 404 ? 'unsupported_server' : 'request_failed', status }));
+      else console.error(pc.red('✗') + ` ${status === 404 ? 'This AgentsTrack server does not have the summary route yet.' : errorMessage(error)}`);
+      process.exitCode = 2;
     }
   });
 

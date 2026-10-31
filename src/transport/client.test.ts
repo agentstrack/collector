@@ -52,3 +52,22 @@ describe('BatchResult', () => {
     expect(BatchResult.safeParse({ error: 'Bad Gateway' }).success).toBe(false);
   });
 });
+
+describe('ApiClient.summary', () => {
+  it('asks for the key owner summary with the key as a bearer token', async () => {
+    const { ApiClient } = await import('./client.js');
+    const calls: { url: string; auth: string | null }[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string, init: RequestInit) => {
+      calls.push({ url, auth: new Headers(init.headers).get('authorization') });
+      return new Response(JSON.stringify({ totals: { sessions: 2 } }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const out = await new ApiClient({ apiUrl: 'https://api.example/', apiKey: 'at_test_k' }).summary(7.9);
+      expect(out).toEqual({ totals: { sessions: 2 } });
+      expect(calls).toEqual([{ url: 'https://api.example/v1/collector/summary?days=7', auth: 'Bearer at_test_k' }]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
