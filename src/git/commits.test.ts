@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitCommitWatcher } from './commits.js';
@@ -92,5 +92,83 @@ describe('GitCommitWatcher', () => {
     const secondSha = String(second[0]!.event.payload['sha']);
     expect(secondSha).not.toBe(firstSha);
     expect(second[0]!.event.payload['files_changed']).toBe(1);
+  });
+});
+
+/**
+ * B1: excluded projects must never leak commits. Two paths: an excluded
+ * session (observed before the exclusion filter ran), and an excluded subfolder
+ * sharing a repo root with an allowed session. Each test gets its own repo so
+ * the 60-second session window cannot pick up another test's commits.
+ */
+describe('GitCommitWatcher exclusions', () => {
+  const dirs: string[] = [];
+  afterAll(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
+
+  function monorepo() {
+    const dir = mkdtempSync(join(tmpdir(), 'agentstrack-mono-'));
+    dirs.push(dir);
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    mkdirSync(join(dir, 'secret'));
+    mkdirSync(join(dir, 'public'));
+    writeFileSync(join(dir, 'public', 'a.txt'), 'a\n');
+    writeFileSync(join(dir, 'secret', 'b.txt'), 'b\n');
+    git('add', '.');
+    git('commit', '-qm', 'base');
+    return {
+      dir,
+      secret: join(dir, 'secret'),
+      publicDir: join(dir, 'public'),
+      git,
+    };
+  }
+
+  const ev = (sessionId: string, cwd: string): NormalizedEvent => ({
+    event: {
+      occurred_at: new Date(Date.now() - 60_000).toISOString(),
+      session_id: sessionId,
+      agent: 'claude_code',
+      event_type: 'command.executed',
+      payload: { command: 'git' },
+    },
+    cwd,
+  });
+
+  it('reports nothing from a session whose cwd is excluded, even for a commit outside the excluded path', async () => {
+    const m = monorepo();
+    const watcher = new GitCommitWatcher({ excluded: [m.secret] });
+    watcher.observe([ev('sess-x', m.secret), ev('sess-x', join(m.secret, 'deep'))]);
+    writeFileSync(join(m.publicDir, 'a.txt'), 'public change\n');
+    m.git('commit', '-qam', 'public change made from the excluded session');
+    expect(await watcher.poll()).toEqual([]);
+  });
+
+  it('does not report a commit that touches an excluded subfolder under an allowed session', async () => {
+    const m = monorepo();
+    const watcher = new GitCommitWatcher({ excluded: [m.secret] });
+    watcher.observe([ev('sess-allowed', m.publicDir)]);
+
+    writeFileSync(join(m.secret, 'b.txt'), 'changed\n');
+    m.git('commit', '-qam', 'touch excluded only');
+    writeFileSync(join(m.publicDir, 'a.txt'), 'changed\n');
+    writeFileSync(join(m.secret, 'b.txt'), 'changed again\n');
+    m.git('commit', '-qam', 'touch both');
+
+    expect(await watcher.poll()).toEqual([]);
+  });
+
+  it('still reports an allowed commit in the same repo', async () => {
+    const m = monorepo();
+    const watcher = new GitCommitWatcher({ excluded: [m.secret] });
+    watcher.observe([ev('sess-allowed', m.publicDir)]);
+
+    writeFileSync(join(m.publicDir, 'a.txt'), 'public change\n');
+    m.git('commit', '-qam', 'public only');
+    const events = await watcher.poll();
+    expect(events).toHaveLength(1);
+    expect(events[0]!.event.payload['files_changed']).toBe(1);
   });
 });

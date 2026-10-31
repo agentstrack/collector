@@ -142,6 +142,23 @@ export async function commitShasSince(gitRoot: string, since: Date): Promise<Com
   }
 }
 
+/**
+ * Every path a commit touches, old and new names of renames included. Null
+ * when git cannot answer, so a caller that must not leak can fail closed.
+ */
+export async function commitPaths(gitRoot: string, sha: string): Promise<string[] | null> {
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['show', '--name-only', '--format=', '--no-renames', '-z', sha],
+      { cwd: gitRoot, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return stdout.split('\0').filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 /** Diffstat for a single commit. */
 export async function commitStat(
   gitRoot: string,
