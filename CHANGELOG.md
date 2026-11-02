@@ -10,6 +10,8 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-02
+
 ### Added
 
 - Codex MCP tool calls (`McpToolCall` items, which have no tool-call line of their own) are reported
@@ -594,7 +596,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/agentstrack/collector/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/agentstrack/collector/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/agentstrack/collector/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/agentstrack/collector/compare/v0.4.5...v0.4.6
