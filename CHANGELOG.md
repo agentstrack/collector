@@ -10,6 +10,47 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-11-02
+
+### Added
+
+- Codex MCP tool calls (`McpToolCall` items, which have no tool-call line of their own) are reported
+  as `mcp__<server>__<tool>` tool events with their duration.
+- Codex turns carry `duration_ms`, and an interrupted turn ends with `aborted: true` and Codex's
+  reason (`turn_aborted`).
+- A forked or multi-agent Codex thread's `session.started` carries `parent_session_id`.
+
+### Fixed
+
+- **Privacy (B1): excluded projects no longer leak commits.** A `git.commit` event (repository root,
+  commit SHA, diffstat) was uploaded for commits made in a project listed under
+  `privacy.excluded_projects`. Two paths did this: a session whose working directory was excluded
+  still armed its repository for commit reporting, and in a monorepo an excluded subfolder shared
+  its root with an allowed project, so commits touching that subfolder were reported. Both are fixed:
+  excluded working directories are ignored, and any commit touching an excluded path is dropped. A
+  commit whose changed files cannot be listed is also dropped, so the check fails closed. Commits
+  whose files are all outside the exclusion list are reported as before. If you exclude a project,
+  update to this release; commits already uploaded are not recalled by this change.
+
+- **Codex 0.15x and newer: prompts, commands and file edits are collected again.** These builds
+  stopped writing `user_message` and `exec_command_end`. Prompts, commands and edits now come from
+  the `item_completed` items (`UserMessage`, `CommandExecution`, `FileChange`), so these sessions no
+  longer show zero prompts. Edit line counts are computed locally; file bodies never enter an event.
+- **Codex token accounting is per response.** Newer rollouts write a `token_usage_record` per model
+  response. Each one is billed once (deduplicated on `response_id`) under the model that served it,
+  instead of the session-wide running total. This fixes two double counts: a mid-session model switch
+  counting the whole total under both models, and a forked or multi-agent child thread re-billing the
+  parent history it starts from. Older rollouts keep the running-total gauge. Sessions already
+  ingested are not rewritten.
+
+### Security
+
+- `zod` 4.4.3 → 4.6.7 (lockfile only, within the existing `^4.4.3` range): fixes
+  [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5), memory exhaustion while
+  validating oversized constrained collections. `zod` validates the config file and server
+  responses, so this is a runtime dependency. Dev-only: `source-map-js` 1.2.1 → 1.2.2
+  ([GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q)).
+
 ## [0.6.0] — 2026-10-31
 
 ### Added
@@ -555,7 +596,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/agentstrack/collector/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/agentstrack/collector/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/agentstrack/collector/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/agentstrack/collector/compare/v0.4.5...v0.4.6

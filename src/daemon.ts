@@ -213,7 +213,9 @@ export class Collector {
     this.spool = deps.spool ?? new Spool(SPOOL_PATH);
     this.client = deps.client ?? new ApiClient({ apiUrl: config.api_url, apiKey: config.api_key });
     this.adapters = buildAdapters(config);
-    this.commitWatcher = config.tracking.git_metadata ? new GitCommitWatcher() : null;
+    this.commitWatcher = config.tracking.git_metadata
+      ? new GitCommitWatcher({ excluded: config.privacy.excluded_projects })
+      : null;
     this.batchSize = config.upload.batch_size;
     this.maxBatchSize = config.upload.batch_size;
   }

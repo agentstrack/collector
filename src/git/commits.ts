@@ -1,6 +1,8 @@
+import { join } from 'node:path';
 import type { NormalizedEvent } from '../adapters/types.js';
 import { deterministicEventId } from '../queue/event-id.js';
-import { commitShasSince, commitStat, findGitRoot } from './repo.js';
+import { isExcluded } from '../privacy/paths.js';
+import { commitPaths, commitShasSince, commitStat, findGitRoot } from './repo.js';
 
 /**
  * Emits `git.commit` for commits that land while a session is running.
@@ -26,7 +28,13 @@ const MAX_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 /** Overlap added below each repo's last poll time so a commit landing right at the boundary is not missed. */
 const POLL_OVERLAP_MS = 60 * 1000;
 
+export interface GitCommitWatcherOptions {
+  /** privacy.excluded_projects. Nothing under these paths is observed or reported. */
+  excluded?: string[];
+}
+
 export class GitCommitWatcher {
+  private readonly excluded: string[];
   /** One entry per repo: the session most recently active in it. */
   private readonly repos = new Map<string, WatchedRepo>();
   /**
@@ -40,11 +48,18 @@ export class GitCommitWatcher {
   /** cwd -> git root, so a repeated cwd costs no filesystem walk. */
   private readonly roots = new Map<string, string | null>();
 
+  constructor(options: GitCommitWatcherOptions = {}) {
+    this.excluded = options.excluded ?? [];
+  }
+
   /** Records which repo each session is working in. Cheap: no git process. */
   observe(events: NormalizedEvent[]): void {
     for (const item of events) {
       const cwd = item.cwd;
       if (!cwd) continue;
+      // Checked before the git root is resolved: an excluded cwd must not arm
+      // its repo, or the repo's commits are reported under another session.
+      if (this.excluded.length > 0 && isExcluded(cwd, this.excluded)) continue;
 
       let root = this.roots.get(cwd);
       if (root === undefined) {
@@ -71,6 +86,16 @@ export class GitCommitWatcher {
         since: at,
       });
     }
+  }
+
+  /**
+   * False when any path the commit touches is excluded, or git cannot list
+   * them: a commit we cannot check is not reported.
+   */
+  private async touchesOnlyAllowed(gitRoot: string, sha: string): Promise<boolean> {
+    const paths = await commitPaths(gitRoot, sha);
+    if (paths === null) return false;
+    return paths.every((path) => !isExcluded(join(gitRoot, path), this.excluded));
   }
 
   /**
@@ -101,6 +126,11 @@ export class GitCommitWatcher {
         const key = `${repo.gitRoot}:${ref.sha}`;
         if (this.emitted.has(key)) continue;
         this.emitted.set(key, now.getTime());
+
+        // A repo root can contain an excluded subfolder, and a commit that
+        // touches it is excluded work even when another session is active in
+        // the same repo. Looked up only when exclusions exist.
+        if (this.excluded.length > 0 && !(await this.touchesOnlyAllowed(repo.gitRoot, ref.sha))) continue;
 
         // Diffstat is fetched only for a commit we have not emitted before.
         const stat = await commitStat(repo.gitRoot, ref.sha);
