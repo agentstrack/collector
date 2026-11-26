@@ -131,8 +131,11 @@ export class KimiCodeAdapter implements AgentAdapter {
         const call = callId ? this.calls.get(callId) : undefined;
         if (callId) this.calls.delete(callId);
         const value = (p['return_value'] ?? {}) as Record<string, unknown>;
+        // ToolResult is written when the call ENDS; durations are start-stamped
+        // (event-schema DurationMs), so the result is stamped at its ToolCall.
+        // Unpaired, it has no duration and stays where it is.
         return [
-          wrap(value['is_error'] === true ? 'tool.failed' : 'tool.completed', {
+          event(s, call ? new Date(call.atMs).toISOString() : at, value['is_error'] === true ? 'tool.failed' : 'tool.completed', {
             tool_name: call?.name ?? 'unknown',
             tool_call_id: callId,
             ...(call ? { duration_ms: Math.max(0, atMs - call.atMs) } : {}),

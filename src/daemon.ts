@@ -634,7 +634,10 @@ export class Collector {
       this.openSessions.delete(key);
       return;
     }
-    const at = Date.parse(event.occurred_at);
+    // A duration-carrying event is start-stamped and ran until start + duration:
+    // that end, not the stamp, is the session's last activity.
+    const duration = event.payload['duration_ms'];
+    const at = Date.parse(event.occurred_at) + (typeof duration === 'number' && Number.isFinite(duration) ? duration : 0);
     if (!Number.isFinite(at)) return;
     const open = this.openSessions.get(key);
     if (open) {

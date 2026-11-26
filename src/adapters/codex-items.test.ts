@@ -19,6 +19,41 @@ function run(lines: string[], sourceFile = ctx.sourceFile): NormalizedEvent[] {
 }
 const ofType = (events: NormalizedEvent[], t: string) => events.filter((e) => e.event.event_type === t);
 
+describe('CodexAdapter, end-stamped results', () => {
+  const line = (timestamp: string, payload: Record<string, unknown>, type = 'event_msg') =>
+    JSON.stringify({ timestamp, type, payload });
+  const meta = line('2026-11-20T09:00:00.000Z', { id: '0c000000-0000-4000-8000-000000000001', cwd: '/w' }, 'session_meta');
+  const call = (at: string) =>
+    line(at, { type: 'function_call', name: 'exec_command', call_id: 'c9', arguments: '{}' }, 'response_item');
+  const end = (at: string, secs: number) =>
+    line(at, { type: 'exec_command_end', call_id: 'c9', command: ['make'], exit_code: 0, duration: { secs, nanos: 0 } });
+
+  it('emits a 10-minute command that ended at T at T - 10 min, tool and command alike', () => {
+    const out = run([meta, call('2026-11-20T09:00:00.000Z'), end('2026-11-20T09:10:00.000Z', 600)]);
+    const terminal = [...ofType(out, 'tool.completed'), ...ofType(out, 'command.executed')];
+    expect(terminal).toHaveLength(2);
+    for (const e of terminal) {
+      expect(e.event.occurred_at).toBe('2026-11-20T09:00:00.000Z');
+      expect(e.event.payload['duration_ms']).toBe(600_000);
+    }
+  });
+
+  it('never back-dates past the call itself, and keeps the duration Codex measured', () => {
+    // Codex claims 10 minutes, but the call line was written 4 minutes before the end.
+    const out = run([meta, call('2026-11-20T09:06:00.000Z'), end('2026-11-20T09:10:00.000Z', 600)]);
+    const cmd = ofType(out, 'command.executed')[0]!;
+    expect(cmd.event.occurred_at).toBe('2026-11-20T09:06:00.000Z');
+    expect(cmd.event.payload['duration_ms']).toBe(600_000);
+  });
+
+  it('leaves a result with no duration, or an unparseable stamp, where it was', () => {
+    const zero = run([meta, call('2026-11-20T09:00:00.000Z'), end('2026-11-20T09:10:00.000Z', 0)]);
+    expect(ofType(zero, 'command.executed')[0]!.event.occurred_at).toBe('2026-11-20T09:10:00.000Z');
+    const bad = run([meta, end('not-a-date', 600)]);
+    expect(ofType(bad, 'command.executed')[0]!.event.occurred_at).toBe('not-a-date');
+  });
+});
+
 describe('CodexAdapter, item_completed rollouts', () => {
   const events = run(fixture('codex-session-v2.jsonl'));
 
@@ -78,12 +113,21 @@ describe('CodexAdapter, item_completed rollouts', () => {
     expect(x1).toEqual(['tool.started', 'tool.completed']);
   });
 
-  it('ends completed and aborted turns with their duration', () => {
-    const ended = ofType(events, 'agent.turn.ended').map((e) => e.event.payload);
-    expect(ended).toEqual([
-      { turn_id: 't1', duration_ms: 6000 },
-      { turn_id: 't2', duration_ms: 3000, aborted: true, abort_reason: 'interrupted' },
+  it('ends completed and aborted turns at the end, with no duration to count twice', () => {
+    const ended = ofType(events, 'agent.turn.ended');
+    expect(ended.map((e) => e.event.payload)).toEqual([
+      { turn_id: 't1' },
+      { turn_id: 't2', aborted: true, abort_reason: 'interrupted' },
     ]);
+    // Still the end-of-turn marker the Live phase reads: stamped when the turn ended.
+    expect(ended[0]!.event.occurred_at).toBe('2026-10-28T10:00:06.000Z');
+  });
+
+  it('back-dates CommandExecution and MCP results to when the work started', () => {
+    const cmd = ofType(events, 'command.executed')[0]!;
+    expect(cmd.event.occurred_at).toBe('2026-10-28T10:00:01.750Z'); // 10:00:02 - 250ms
+    const mcp = events.find((e) => e.event.payload['tool_name'] === 'mcp__github__get_issue')!;
+    expect(mcp.event.occurred_at).toBe('2026-10-28T10:00:03.600Z'); // 10:00:04 - 400ms
   });
 
   it('emits no gauge when the daemon resumes mid-file past the first record', () => {
