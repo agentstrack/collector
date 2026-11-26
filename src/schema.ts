@@ -64,11 +64,34 @@ export const EventEnvelope = z.object({
 });
 export type EventEnvelope = z.infer<typeof EventEnvelope>;
 
+/**
+ * Text that carries a link. Mirrors LINK_PATTERN in the server's
+ * @agentstrack/event-schema: project names end up in mail and alerts the
+ * server sends, so the server drops a linked name at ingest — and the
+ * collector drops it here first, so it never leaves the machine.
+ */
+export const LINK_PATTERN = /:\/\/|www\.|[a-z0-9-]\.[a-z]{2,}\//i;
+
+/** Longest project name sent. Mirrors PROJECT_NAME_MAX on the server. */
+export const PROJECT_NAME_MAX = 100;
+
+/**
+ * Mirrors the server's sanitizeProjectName: trimmed, cut to PROJECT_NAME_MAX,
+ * undefined when blank or carrying a link (the server then names the project
+ * after the git remote). Never a rejection — the session still uploads.
+ */
+export function sanitizeProjectName(value: string): string | undefined {
+  const name = value.trim();
+  if (!name || LINK_PATTERN.test(name)) return undefined;
+  return name.slice(0, PROJECT_NAME_MAX).trim();
+}
+
 export interface RepoContext {
   remote_hash?: string;
   remote_owner?: string;
   remote_name?: string;
   branch?: string;
   project_path?: string;
+  /** Always passed through sanitizeProjectName. */
   project_name?: string;
 }

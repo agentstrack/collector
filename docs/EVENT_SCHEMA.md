@@ -50,7 +50,7 @@ Every event, from every adapter, has exactly this shape.
 |---|---|---|---|
 | `event_id` | UUID | ✅ | Generated locally at enqueue. The idempotency key. |
 | `schema_version` | `1` | ✅ | Literal. A different value is rejected, not coerced. |
-| `occurred_at` | ISO-8601 with offset | ✅ | Taken from the agent's own log line — when it happened, not when it uploaded. |
+| `occurred_at` | ISO-8601 with offset | ✅ | Taken from the agent's own log line — when it happened, not when it uploaded. An event carrying `duration_ms` is stamped at the **start** of the work it measures (see [Timing](#timing-duration_ms-is-start-anchored)). |
 | `collector_id` | UUID | ✅ | Assigned by the server at registration. Identifies the machine. |
 | `session_id` | string (1–200) | ✅ | The **agent-native** session id, stable for the session's lifetime. |
 | `agent` | enum | ✅ | `claude_code` · `codex` · `gemini_cli` · `opencode` · `cursor` · `cline` · `copilot_cli` · `antigravity` · `kimi_code` · `other` |
@@ -93,6 +93,24 @@ this column is what the adapters in this repository actually produce.
 OpenCode emits no `tool.started`: one `part` row carries the whole call, so the terminal event is
 timestamped at the call's **start** and carries the real `duration_ms`. The server backfills the
 invocation count from the terminal events, so nothing is lost.
+
+#### Timing: `duration_ms` is start-anchored
+
+Any event that carries `duration_ms` is stamped at the **start** of what it measures; the server
+counts it as active over `[occurred_at, occurred_at + duration_ms]`. Stamping it at the end would
+count the duration a second time, after the work was over.
+
+| Agent | Duration-carrying events | Anchor |
+|---|---|---|
+| OpenCode, Antigravity | `tool.completed` / `tool.failed` | The call's own start time. |
+| Codex | `exec_command_end` → `tool.*` + `command.executed`; `CommandExecution` and `McpToolCall` items | Written at the end; back-dated to `end − duration_ms`, never before the call's `function_call` line. |
+| Kimi Code | `ToolResult` → `tool.*` | Written at the end; stamped at its `ToolCall`. |
+| Claude Code, Gemini CLI | none | — |
+
+`agent.turn.ended` is the end-of-turn marker and stays end-stamped, so it carries no `duration_ms`
+(the turn starts at its `agent.turn.started`). Collectors up to 0.6.1 stamped Codex and Kimi results
+at the end and sent a duration on Codex turn ends; the `event_id` of a re-read line does not depend
+on `occurred_at`, so a re-read never duplicates an event that already uploaded.
 
 Fields the schema allows but 0.1.0 never populates: `task_category`, `latency_ms`,
 `model.response.turn_id`, `file.read.lines`, `error.fatal`. `reported_cost_usd` is populated by
@@ -195,7 +213,7 @@ else in the envelope: the matched text, a prefix of it, a hash of it, or the cha
 | `remote_name` | string | e.g. `api` |
 | `branch` | string | From `.git/HEAD`. Absent on a detached HEAD. |
 | `project_path` | string | **Dropped** under `file_paths: never` and `relative` (the default). Sent only under `absolute`. |
-| `project_name` | string | Basename of the git root. |
+| `project_name` | string | Basename of the git root (or of the working directory outside git), trimmed and cut to 100 characters. **Omitted** when it contains a link (`://`, `www.`, `host.tld/`) — the server then names the project after `remote_name`. The server applies the same rule at ingest. |
 
 Attached to events by the daemon when `tracking.git_metadata` is `true` (the default), based on the
 session's working directory.
@@ -255,7 +273,6 @@ The event where privacy mode is most visible.
 |---|---|---|
 | `turn_id` | string | |
 | `model` | string | `started` only. The model the turn opened with, when the agent states it — Codex's `turn_context`. |
-| `duration_ms` | int ≥ 0 | `ended` only. Codex ≥0.15x (`task_complete` / `turn_aborted`). |
 | `aborted` | `true` | `ended` only. The turn was interrupted or replaced (Codex `turn_aborted`). |
 | `abort_reason` | string | `ended` only, with `aborted`. Codex's own reason enum, e.g. `interrupted`. |
 
@@ -304,7 +321,7 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 |---|---|---|---|---|
 | `tool_name` | string ✅ | ✅ | ✅ | ✅ |
 | `tool_call_id` | string | ✅ | ✅ | ✅ |
-| `duration_ms` | int ≥ 0 | — | schema only | schema only |
+| `duration_ms` | int ≥ 0 | — | OpenCode, Antigravity, Codex (exec, MCP), Kimi; start-stamped | same |
 | `error_kind` | string | — | — | schema only |
 | `skill` | string | ✅ | ✅ | ✅ |
 | `subagent_type` | string | ✅ | ✅ | ✅ |
@@ -347,7 +364,7 @@ counts have to be derived in the adapter.
 |---|---|---|
 | `command` | string ✅ | The command line, with the 15 built-in secret rules applied — this is the default (`shell_arguments: redact_secrets`). Set `shell_arguments: never` to truncate it to the first whitespace token. |
 | `exit_code` | int | Codex only. |
-| `duration_ms` | int ≥ 0 | Codex only. |
+| `duration_ms` | int ≥ 0 | Codex only. The event is stamped at the command's start. |
 
 ### Git
 

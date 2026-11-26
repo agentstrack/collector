@@ -128,6 +128,25 @@ export function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Back-dates an end-stamped result to the start of the work it measures.
+ *
+ * Wire contract: an event carrying `duration_ms` is stamped at its START
+ * (server event-schema `DurationMs`); the server opens [occurred_at,
+ * occurred_at + duration_ms]. Codex and Kimi write the result line when the
+ * command ends, so their events are moved to `end - duration`, never before
+ * `floorMs` (the call's own start, when seen) nor after the end. The
+ * duration is the agent's own measurement and is never rewritten; line stamps
+ * are only write times, so a clamp means those disagree by the skew. Without
+ * a usable end or duration the stamp is returned unchanged.
+ */
+export function startAnchored(endIso: string, durationMs: number, floorMs?: number): string {
+  const end = Date.parse(endIso);
+  if (!Number.isFinite(end) || !Number.isFinite(durationMs) || durationMs <= 0) return endIso;
+  const floor = floorMs !== undefined && Number.isFinite(floorMs) ? Math.min(floorMs, end) : -Infinity;
+  return new Date(Math.max(end - durationMs, floor)).toISOString();
+}
+
 /** Head-of-file lines cached on (path, mtime) — see readHeadLines. */
 const headCache = new Map<string, { mtimeMs: number; lines: string[] }>();
 

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { EVENT_TYPES, AGENTS, PRIVACY_MODES, SCHEMA_VERSION, EventEnvelope } from './schema.js';
+import { EVENT_TYPES, AGENTS, PRIVACY_MODES, SCHEMA_VERSION, EventEnvelope, LINK_PATTERN, PROJECT_NAME_MAX } from './schema.js';
 import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { OpenCodeAdapter } from './adapters/opencode.js';
@@ -126,6 +126,14 @@ describe('wire contract', () => {
     // The canonical envelope must not carry tenancy fields either.
     expect(canonical.envelope).not.toHaveProperty('organization_id');
     expect(canonical.envelope).not.toHaveProperty('user_id');
+  });
+
+  it.skipIf(!serverPresent && !serverRequired)('sanitizes project_name exactly as the server does', async () => {
+    expect(serverPresent, `AGENTSTRACK_SERVER_REPO=${serverRepo} has no event-schema package`).toBe(true);
+    const server = (await import(SERVER_SCHEMA)) as { LINK_PATTERN: RegExp; PROJECT_NAME_MAX: number };
+    expect(LINK_PATTERN.source).toBe(server.LINK_PATTERN.source);
+    expect(LINK_PATTERN.flags).toBe(server.LINK_PATTERN.flags);
+    expect(PROJECT_NAME_MAX).toBe(server.PROJECT_NAME_MAX);
   });
 
   it.skipIf(!serverPresent && !serverRequired)('every adapter fixture event passes the server payload schemas', async () => {

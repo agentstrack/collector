@@ -5,7 +5,7 @@ import type {
   AccountIdentity, AgentAdapter, DetectionResult, HealthStatus, NormalizeContext, NormalizedEvent,
 } from './types.js';
 import { readCodexAccount } from './account.js';
-import { newestJsonl, num, readHeadLines, safeJsonParse, str } from './types.js';
+import { newestJsonl, num, readHeadLines, safeJsonParse, startAnchored, str } from './types.js';
 import { emptyUsage, type TokenUsage } from '../schema.js';
 import { deriveTitle } from '../sessions/title.js';
 import { redact } from '../privacy/redact.js';
@@ -107,6 +107,7 @@ export class CodexAdapter implements AgentAdapter {
       state = {
         sessionId: /([0-9a-f-]{36})\.jsonl$/i.exec(ctx.sourceFile)?.[1],
         calls: new Map(),
+        callStarts: new Map(),
         seenResponseIds: new Set(),
         // Resuming mid-file can land past the first item or usage record, so the
         // format is read from the whole file once rather than inferred from order.
@@ -182,12 +183,15 @@ export class CodexAdapter implements AgentAdapter {
       // function_call_output is a bare string with no exit status.
       const callId = str(payload['call_id']);
       const exitCode = num(payload['exit_code']);
-      const durationMs = secsNanosMs(payload['duration']);
       const failed = exitCode !== 0 || str(payload['status']) === 'failed';
       // The entry stays in `calls`: the function_call_output that must be
       // ignored below may still be on its way.
       const toolName = (callId && state.calls.get(callId)) ?? 'exec_command';
-      const terminal = this.wrap(state, occurredAt, failed ? 'tool.failed' : 'tool.completed', {
+      // This line is written when the command ENDS; durations are start-stamped.
+      const durationMs = secsNanosMs(payload['duration']);
+      const startedAt = startAnchored(occurredAt, durationMs, callId ? state.callStarts.get(callId) : undefined);
+      if (callId) state.callStarts.delete(callId);
+      const terminal = this.wrap(state, startedAt, failed ? 'tool.failed' : 'tool.completed', {
         tool_name: toolName,
         tool_call_id: callId,
         duration_ms: durationMs,
@@ -196,7 +200,7 @@ export class CodexAdapter implements AgentAdapter {
       if (state.itemMode) return [terminal];
       return [
         terminal,
-        this.wrap(state, occurredAt, 'command.executed', {
+        this.wrap(state, startedAt, 'command.executed', {
           command: joinCommand(payload['command']) ?? str(payload['command']) ?? 'shell',
           exit_code: exitCode,
           duration_ms: durationMs,
@@ -206,9 +210,11 @@ export class CodexAdapter implements AgentAdapter {
 
     if (kind === 'task_complete') {
       return [
+        // No duration_ms: this is the end-of-turn marker, stamped at the end,
+        // and a duration on an end-stamped event would be counted again after
+        // it (event-schema DurationMs). agent.turn.started marks the start.
         this.wrap(state, occurredAt, 'agent.turn.ended', {
           turn_id: str(payload['turn_id']),
-          duration_ms: nonNegativeInt(payload['duration_ms']),
         }),
       ];
     }
@@ -217,7 +223,6 @@ export class CodexAdapter implements AgentAdapter {
       return [
         this.wrap(state, occurredAt, 'agent.turn.ended', {
           turn_id: str(payload['turn_id']),
-          duration_ms: nonNegativeInt(payload['duration_ms']),
           aborted: true,
           // Codex's own enum ("interrupted", "replaced", …), not user text.
           abort_reason: str(payload['reason'])?.slice(0, 50),
@@ -327,11 +332,14 @@ export class CodexAdapter implements AgentAdapter {
     if (kind === 'CommandExecution') {
       const command = joinCommand(item['command']) ?? str(item['command']);
       if (!command) return [];
+      // item_completed is written when the command ends: back-date it.
+      const durationMs = secsNanosMs(item['duration']);
+      const startedAt = startAnchored(occurredAt, durationMs);
       const events = [
-        this.wrap(state, occurredAt, 'command.executed', {
+        this.wrap(state, startedAt, 'command.executed', {
           command,
           exit_code: num(item['exit_code']),
-          duration_ms: secsNanosMs(item['duration']),
+          duration_ms: durationMs,
         }),
       ];
       for (const { event_type, ...rest } of shellFileTouches(command)) {
@@ -357,11 +365,13 @@ export class CodexAdapter implements AgentAdapter {
       const failed = result['isError'] === true || str(item['status']) === 'failed';
       const started = num(payload['started_at_ms']);
       const completed = num(payload['completed_at_ms']);
+      const durationMs = started > 0 && completed >= started ? completed - started : undefined;
+      const startedAt = durationMs === undefined ? occurredAt : startAnchored(occurredAt, durationMs);
       return [
-        this.wrap(state, occurredAt, failed ? 'tool.failed' : 'tool.completed', {
+        this.wrap(state, startedAt, failed ? 'tool.failed' : 'tool.completed', {
           tool_name: `mcp__${server}__${tool}`,
           tool_call_id: str(item['id']),
-          duration_ms: started > 0 && completed >= started ? completed - started : undefined,
+          duration_ms: durationMs,
         }),
       ];
     }
@@ -381,7 +391,11 @@ export class CodexAdapter implements AgentAdapter {
     if (kind === 'function_call' || kind === 'custom_tool_call') {
       const toolName = str(payload['name']) ?? 'unknown';
       const callId = str(payload['call_id']);
-      if (callId) state.calls.set(callId, toolName);
+      if (callId) {
+        state.calls.set(callId, toolName);
+        const at = Date.parse(occurredAt);
+        if (Number.isFinite(at)) state.callStarts.set(callId, at);
+      }
       const events = [
         this.wrap(state, occurredAt, 'tool.started', {
           tool_name: toolName,
@@ -403,7 +417,10 @@ export class CodexAdapter implements AgentAdapter {
       // exec_command terminates on its exec_command_end (which carries the exit
       // status); the two arrive in either order, so key on the tool, not on order.
       if (toolName === 'exec_command') return [];
-      if (callId) state.calls.delete(callId);
+      if (callId) {
+        state.calls.delete(callId);
+        state.callStarts.delete(callId);
+      }
       // `output` is a string (or a content list for custom tools), never an
       // object. Only the shell_command tool prefixes it with the exit status.
       const exitHeader = /^Exit code: (\d+)/.exec(str(payload['output']) ?? '');
@@ -451,6 +468,8 @@ interface FileState {
   cwd?: string;
   /** call_id → tool name; `*_output` lines carry no name of their own. */
   calls: Map<string, string>;
+  /** call_id → when the call was made, the floor for back-dating its result. */
+  callStarts: Map<string, number>;
   /** The file has token_usage_record lines: bill per response, not the gauge. */
   usageFromRecords?: boolean;
   /** The file has item_completed lines: prompts, commands and edits come from items. */
@@ -481,10 +500,6 @@ export function rolloutFormat(path: string): { usageFromRecords: boolean; itemMo
 function secsNanosMs(value: unknown): number {
   const duration = (value ?? {}) as Record<string, unknown>;
   return num(duration['secs']) * 1000 + Math.round(num(duration['nanos']) / 1e6);
-}
-
-function nonNegativeInt(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 
 /** Newest rollout's `session_meta.cli_version`, if one can be found cheaply. */

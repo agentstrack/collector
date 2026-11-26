@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { hashRemote, normalizeRemote, ownerAndName } from './repo.js';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describeRepo, hashRemote, normalizeRemote, ownerAndName } from './repo.js';
+import { sanitizeProjectName } from '../schema.js';
 
 describe('remote normalization', () => {
   it('collapses every clone form of one repo onto a single identity', () => {
@@ -33,5 +37,28 @@ describe('remote normalization', () => {
   it('does not throw on a malformed remote', () => {
     expect(() => hashRemote('this is not a url')).not.toThrow();
     expect(ownerAndName('nonsense')).toEqual({});
+  });
+});
+
+describe('project_name', () => {
+  it('is cut to 100 characters and dropped when it carries a link, at the source', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentstrack-name-'));
+    try {
+      const long = join(dir, 'x'.repeat(150));
+      const linked = join(dir, 'www.reset-your-password.example');
+      mkdirSync(long);
+      mkdirSync(linked);
+      expect(describeRepo(long)?.project_name).toBe('x'.repeat(100));
+      expect(describeRepo(linked)?.project_name).toBeUndefined();
+      expect(describeRepo(linked)?.project_path).toBe(linked);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('mirrors the server transform', () => {
+    expect(sanitizeProjectName('  api  ')).toBe('api');
+    expect(sanitizeProjectName('agentstrack.ai')).toBe('agentstrack.ai');
+    for (const hostile of ['https://x', 'evil.com/reset', 'www.evil.io', '  ']) expect(sanitizeProjectName(hostile)).toBeUndefined();
   });
 });

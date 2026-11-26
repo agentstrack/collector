@@ -182,6 +182,8 @@ describe('KimiCodeAdapter (format from upstream source)', () => {
 
   it('pairs tool calls with results and counts multi-edit lines', () => {
     expect(byType(events, 'tool.completed')[0]!.event.payload).toMatchObject({ tool_name: 'Shell', duration_ms: 2000 });
+    // ToolResult is written at the end; the event is stamped at its ToolCall.
+    expect(byType(events, 'tool.completed')[0]!.event.occurred_at).toBe(new Date(1790244003100).toISOString());
     expect(byType(events, 'tool.failed')[0]!.event.payload['tool_name']).toBe('StrReplaceFile');
     expect(byType(events, 'file.changed')[0]!.event.payload).toMatchObject({ lines_added: 2, lines_removed: 1 });
     expect(byType(events, 'agent.turn.ended')).toHaveLength(1);

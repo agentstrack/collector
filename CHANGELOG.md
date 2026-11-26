@@ -10,6 +10,21 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-26
+
+### Fixed
+
+- Events that carry `duration_ms` are now stamped at the **start** of the work, which is what the
+  server's time reconstruction assumes. Codex command results (`exec_command_end`,
+  `CommandExecution` items), Codex MCP calls and Kimi Code tool results were stamped when they
+  ended, so a ten-minute command counted up to ten more minutes of agent time after it finished.
+  They are now back-dated to `end − duration_ms`, never before the call itself. Event ids are
+  unchanged, so a re-read line still deduplicates.
+- Codex `agent.turn.ended` no longer carries `duration_ms`: it is the end-of-turn marker and stays
+  stamped at the end, so the duration was being counted after the turn as well.
+- `project_name` is trimmed, cut to 100 characters, and omitted when it contains a link. It becomes
+  the project's name on the server, which mails it in summaries and alerts.
+
 ## [0.6.1] — 2026-11-02
 
 ### Added
@@ -596,7 +611,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/agentstrack/collector/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/agentstrack/collector/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/agentstrack/collector/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/agentstrack/collector/compare/v0.4.6...v0.5.0

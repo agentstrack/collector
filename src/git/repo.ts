@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import type { RepoContext } from '../schema.js';
+import { sanitizeProjectName, type RepoContext } from '../schema.js';
 
 const exec = promisify(execFile);
 
@@ -82,13 +82,13 @@ export function ownerAndName(remote: string): { owner?: string; name?: string } 
 
 export function describeRepo(cwd: string): RepoContext | undefined {
   const root = findGitRoot(cwd);
-  if (!root) return { project_path: cwd, project_name: basename(cwd) };
+  if (!root) return { project_path: cwd, project_name: sanitizeProjectName(basename(cwd)) };
 
   const remote = readRemote(root);
   const context: RepoContext = {
     branch: readBranch(root),
     project_path: root,
-    project_name: basename(root),
+    project_name: sanitizeProjectName(basename(root)),
   };
   if (remote) {
     context.remote_hash = hashRemote(remote);
