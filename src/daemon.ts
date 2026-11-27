@@ -11,6 +11,7 @@ import { Spool } from './queue/spool.js';
 import { machineInfo } from './machine.js';
 import { tailFile } from './queue/tailer.js';
 import { deterministicEventId } from './queue/event-id.js';
+import { readOpenIslandRateLimits } from './adapters/open-island.js';
 export { deterministicEventId };
 import { ApiClient, ApiError, backoffMs, VERSION, type BatchResult, type ServerConfig } from './transport/client.js';
 import { ClaudeCodeAdapter } from './adapters/claude.js';
@@ -68,6 +69,14 @@ export function buildAdapters(config: Config): AgentAdapter[] {
  * them would only add bytes and more places for the identity to leak from.
  */
 const ACCOUNT_EVENTS = new Set(['session.started', 'user.prompted']);
+
+/**
+ * Event types newer than the servers this collector may talk to. Each is sent
+ * only when GET /v1/collector/config lists it in `event_types`: a batch the
+ * server rejects in full pauses the whole upload (`reason: 'schema'`), so an
+ * older backend must never be handed one. Unknown config means "not listed".
+ */
+export const GATED_EVENT_TYPES = new Set(['rate_limit.reported']);
 
 /**
  * Whether this event may carry account attribution.
@@ -510,6 +519,8 @@ export class Collector {
       }
     }
 
+    if (this.config.tracking.open_island_rate_limits) queued += this.reportOpenIslandRateLimits();
+
     queued += this.endIdleSessions(this.config.tracking.idle_timeout_seconds * 1000, 'timeout');
 
     if (queued > 0) log(`Queued ${queued} events across ${files} files`);
@@ -580,6 +591,9 @@ export class Collector {
     const envelopes: EventEnvelope[] = [];
 
     for (const item of items) {
+      const type = item.event.event_type;
+      if (GATED_EVENT_TYPES.has(type) && !this.serverConfig?.event_types?.includes(type)) continue;
+
       const cwd = item.cwd;
       // An excluded project never produces an event at all.
       if (cwd && isExcluded(cwd, this.config.privacy.excluded_projects)) continue;
@@ -628,7 +642,49 @@ export class Collector {
     return this.spool.enqueue(envelopes);
   }
 
+  /** mtime of the Open Island file last reported, so an unchanged file is read but not re-sent. */
+  private openIslandMtimeMs = 0;
+
+  /**
+   * Attaches Open Island's Claude plan windows to the most recently active
+   * Claude Code session — the file names no session or account, so that is
+   * the best available owner, and the server labels it advisory. No live
+   * Claude session means nothing is sent.
+   */
+  private reportOpenIslandRateLimits(path?: string): number {
+    const collectorId = this.config.collector_id;
+    if (!collectorId) return 0;
+    const reading = readOpenIslandRateLimits(path);
+    if (!reading || reading.mtimeMs === this.openIslandMtimeMs) return 0;
+    let owner: OpenSession | undefined;
+    for (const s of this.openSessions.values()) {
+      if (s.agent === 'claude_code' && (!owner || s.lastAtMs > owner.lastAtMs)) owner = s;
+    }
+    if (!owner) return 0;
+    this.openIslandMtimeMs = reading.mtimeMs;
+    return this.enqueue(
+      [
+        {
+          event: {
+            occurred_at: new Date(reading.mtimeMs).toISOString(),
+            session_id: owner.sessionId,
+            agent: 'claude_code',
+            agent_version: owner.agentVersion,
+            event_type: 'rate_limit.reported',
+            payload: { source: 'open_island', windows: reading.windows },
+          },
+          eventId: deterministicEventId(`rate_limit\nopen_island\n${owner.sessionId}\n${reading.mtimeMs}`),
+        },
+      ],
+      collectorId,
+    );
+  }
+
   private trackSession(event: EventEnvelope): void {
+    // A plan-window reading is not activity: Open Island rewrites its file on
+    // any Claude session's status line, and counting that would keep a quiet
+    // session open for ever.
+    if (event.event_type === 'rate_limit.reported') return;
     const key = `${event.agent}::${event.session_id}`;
     if (event.event_type === 'session.ended') {
       this.openSessions.delete(key);

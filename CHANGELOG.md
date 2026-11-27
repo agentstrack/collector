@@ -10,6 +10,17 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Plan headroom: `rate_limit.reported`.** Codex's `rate_limits` windows (used %, window length,
+  reset time) are reported when they change, keyed by window length. The `credits` balance is never
+  read. Additive: a new event type, sent only to a server that lists it in the `event_types` field of
+  `GET /v1/collector/config`, so an older backend is never handed an event it would reject.
+- `tracking.open_island_rate_limits` (default `false`): read Claude Code's 5h/7d windows from Open
+  Island's `/tmp/open-island-rl.json` and report them on the most recently active Claude session.
+  The file is refused if it is a symlink, not owned by you or over 4 KB, and its figures are labelled
+  advisory. Read only; nothing is written.
+
 ## [0.6.2] - 2026-11-26
 
 ### Fixed

@@ -89,6 +89,7 @@ this column is what the adapters in this repository actually produce.
 | `usage.reported` | — | ✅ | ✅ | `token_usage_record` per response (`cumulative: false`), or `token_count` totals on older Codex / `session` row totals (`cumulative: true`) |
 | `error` | — | ✅ | — | `error` / `stream_error` |
 | `heartbeat` | — | — | — | not emitted in 0.1.0 |
+| `rate_limit.reported` | opt-in | ✅ | — | `token_count.rate_limits` on change / Open Island's `/tmp/open-island-rl.json` with `tracking.open_island_rate_limits` — sent only to a server that lists it in `event_types` |
 
 OpenCode emits no `tool.started`: one `part` row carries the whole call, so the terminal event is
 timestamped at the call's **start** and carries the real `duration_ms`. The server backfills the
@@ -312,6 +313,26 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 | `cumulative` | boolean | Defaults to `false`. **When `true` these are running totals — the server takes the max (a gauge), it must not sum them (a counter).** OpenCode always emits `true`. Codex emits `false` from ≥0.15x, one event per `token_usage_record` (deduplicated on `response_id`); per-response usage was checked against real rollouts and sums exactly to the thread total, is tagged with the model that served it, and excludes the parent history a forked or multi-agent child thread inherits. Older Codex rollouts (no `token_usage_record`) keep the `token_count` gauge, with its known limit: the total is session-wide but tagged with the *current* model, so a session that switches model mid-way has its whole total counted under both. |
 | `reported_cost_usd` | number ≥ 0 | Only when the agent exposes a cost. Drives `basis: REPORTED` rather than `ESTIMATED`. OpenCode's `session.cost` is a real settled provider charge and lands here. |
 | `plan_type` | string | Subscription plan where known — a subscription "cost" is always an API-equivalent estimate and is labelled as such. |
+
+#### `rate_limit.reported`
+
+How much of a subscription plan's rate-limit windows is used, as the agent reports it. Added after
+the 18 blueprint types: the collector sends it only to a server whose `GET /v1/collector/config`
+lists it in `event_types`, because a batch an older server rejects in full pauses the upload. It is
+not activity — it moves no session's last-activity time and no time bucket.
+
+| Field | Type | Notes |
+|---|---|---|
+| `source` | `codex` \| `open_island` ✅ | Where the figures came from. `open_island` readings are advisory. |
+| `windows` | array, 1–4 ✅ | `{ window_minutes: int 1–44640, used_percent: 0–100, resets_at?: ISO-8601 }`. Keyed by length: Codex's `primary` is the 7-day window on some plans. |
+| `plan_type` | string | Codex's `rate_limits.plan_type`. |
+
+Codex: read from `token_count.rate_limits.primary`/`.secondary`, and emitted only when the windows
+change (Codex repeats the snapshot every turn). The sibling `credits` block is never read.
+Claude Code: only with `tracking.open_island_rate_limits: true`, from the file Open Island writes
+(`five_hour` → 300, `seven_day` → 10080 minutes), attached to the most recently active Claude
+session. The file is refused when it is a symlink, not owned by the user or over 4 KB, and it names
+no account, so with several Claude profiles it describes whichever last ran its status line.
 
 ### Tools
 

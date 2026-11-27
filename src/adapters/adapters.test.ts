@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ClaudeCodeAdapter, readUsage } from './claude.js';
-import { CodexAdapter, readCodexUsage } from './codex.js';
+import { CodexAdapter, readCodexRateLimits, readCodexUsage } from './codex.js';
 import type { NormalizedEvent } from './types.js';
 import { applyPrivacy } from '../privacy/pipeline.js';
 import { Config } from '../config.js';
@@ -218,6 +218,38 @@ describe('CodexAdapter', () => {
   it('reads the exit status off the shell_command output header', () => {
     const failed = events.find((e) => e.event.event_type === 'tool.failed');
     expect(failed!.event.payload).toMatchObject({ tool_name: 'shell_command', tool_call_id: 'c2' });
+  });
+
+  it('reports plan windows by length, drops credits, and re-sends only on change', () => {
+    // The real shape: on this plan `primary` IS the 7-day window and `secondary` is null.
+    const limits = events.filter((e) => e.event.event_type === 'rate_limit.reported');
+    expect(limits).toHaveLength(1);
+    expect(limits[0]!.event.payload).toEqual({
+      source: 'codex',
+      plan_type: 'plus',
+      windows: [{ window_minutes: 10080, used_percent: 3, resets_at: '2026-11-04T13:29:34.000Z' }],
+    });
+    expect(JSON.stringify(limits[0]!.event.payload)).not.toContain('balance');
+
+    const adapter = new CodexAdapter();
+    const lines = fixture('codex-session.jsonl');
+    run(adapter, lines);
+    const same = adapter.normalize(lines[9]!, ctx).map((e) => e.event.event_type);
+    expect(same).toEqual(['usage.reported']); // an unchanged snapshot is not re-sent
+    const moved = adapter.normalize(lines[9]!.replace('"used_percent":3.0', '"used_percent":4.0'), ctx);
+    expect(moved.map((e) => e.event.event_type)).toEqual(['usage.reported', 'rate_limit.reported']);
+  });
+
+  it('skips malformed windows instead of guessing', () => {
+    expect(
+      readCodexRateLimits({
+        primary: { used_percent: 101, window_minutes: 300 },
+        secondary: { used_percent: 5, window_minutes: 0 },
+      }),
+    ).toEqual([]);
+    expect(readCodexRateLimits({ primary: { used_percent: 5, window_minutes: 300, resets_at: 1e20 } })).toEqual([
+      { window_minutes: 300, used_percent: 5 },
+    ]);
   });
 
   it('keeps per-file state separate so two rollouts do not bleed together', () => {

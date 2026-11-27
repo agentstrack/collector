@@ -27,6 +27,7 @@ export const EVENT_TYPES = [
   'file.read', 'file.changed', 'command.executed',
   'git.commit', 'git.branch_changed',
   'usage.reported', 'error', 'heartbeat',
+  'rate_limit.reported',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
