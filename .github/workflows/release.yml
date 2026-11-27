@@ -72,7 +72,7 @@ jobs:
       # Auth is npm Trusted Publishing (OIDC via id-token above), not a token
       # secret: publish tokens expire after 90 days, which silently broke 0.6.2.
       - name: Publish
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --loglevel verbose
 
       - name: Create GitHub release
         env:
