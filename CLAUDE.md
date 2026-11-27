@@ -46,6 +46,11 @@ under the right name cannot be undone.
 - **npm's packument is CDN-cached for a minute or two after a publish.** `npm view` reporting the old
   version right after a successful publish is staleness, not failure — confirm with
   `curl -s https://registry.npmjs.org/@agentstrack%2Fcollector | jq '.["dist-tags"]'`.
+- **Publishing uses npm Trusted Publishing (OIDC), not `NPM_TOKEN`.** The token secret expired after
+  npm's 90-day cap and the v0.6.2 run failed with a misleading `E404 ... PUT`. A 404 on publish
+  means auth, not a missing package. Trust is configured on npmjs.com for `release.yml` + env `npm`;
+  setup-node injects a placeholder token, so a failed OIDC exchange also shows up as that E404 —
+  add `--loglevel verbose` to see `oidc ...` lines with the real reason.
 - **0.2.0 and 0.4.0 have no tags and never will.** The history was squashed before the repo went
   public and no commit carries either version; their notes are folded into the v0.2.1 and v0.4.1
   releases. Do not try to reconstruct them.

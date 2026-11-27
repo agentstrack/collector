@@ -69,10 +69,10 @@ jobs:
           fi
 
       # prepublishOnly runs build + test again inside the publish step.
+      # Auth is npm Trusted Publishing (OIDC via id-token above), not a token
+      # secret: publish tokens expire after 90 days, which silently broke 0.6.2.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub release
         env:
