@@ -427,7 +427,7 @@ program
       try {
         const server = await client.getConfig();
         check(true, `API reachable at ${config.api_url}`);
-        console.log(`    ${pc.dim(`org privacy mode: ${server.privacy_mode}, retention ${server.retention_days}d`)}`);
+        console.log(`    ${pc.dim(`org privacy mode: ${server.privacy_mode}, retention ${server.retention_days ?? '?'}d`)}`);
       } catch (error) {
         check(false, `API reachable at ${config.api_url}`, errorMessage(error));
       }

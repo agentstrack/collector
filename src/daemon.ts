@@ -490,7 +490,7 @@ export class Collector {
 
   private applyOrgPolicy(policy: OrgPolicy): void {
     // Compiled once per config refresh, not once per event.
-    this.orgRules = compileRules(policy.redaction_rules);
+    this.orgRules = compileRules(policy.redaction_rules, log);
     // The org sets a ceiling; a stricter local mode is honoured, a looser one
     // is not. Same rule as `login`, shared so the two cannot drift.
     const effective = clampPrivacyMode(this.localMode, toPrivacyMode(policy.privacy_mode));

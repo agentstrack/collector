@@ -185,8 +185,11 @@ export class ApiClient {
     } catch (error) {
       if (error instanceof ApiError) throw error;
       // Network failure, DNS, timeout: always worth retrying.
+      const timedOut = error instanceof Error && error.name === 'AbortError';
       throw new ApiError(
-        error instanceof Error ? error.message : String(error),
+        timedOut
+          ? `request timed out after ${(this.options.timeoutMs ?? 30_000) / 1000}s`
+          : error instanceof Error ? error.message : String(error),
         0,
         true,
       );

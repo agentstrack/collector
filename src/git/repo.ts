@@ -8,6 +8,20 @@ import { sanitizeProjectName, type RepoContext } from '../schema.js';
 const exec = promisify(execFile);
 
 /**
+ * Runs git inside a repository the collector did not choose (it comes from a
+ * transcript), so the repo's own config must not get to run anything: no
+ * fsmonitor hook, no pager, no external diff or textconv driver, no prompts.
+ */
+function git(gitRoot: string, args: string[]): Promise<{ stdout: string }> {
+  return exec('git', ['-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', ...args], {
+    cwd: gitRoot,
+    timeout: 10_000,
+    maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },
+  });
+}
+
+/**
  * Git enrichment.
  *
  * Branch and remote are read straight out of .git — two file reads beat
@@ -123,11 +137,7 @@ export interface CommitRef {
  */
 export async function commitShasSince(gitRoot: string, since: Date): Promise<CommitRef[]> {
   try {
-    const { stdout } = await exec(
-      'git',
-      ['log', `--since=${since.toISOString()}`, '--format=%H%x00%cI', '--no-merges'],
-      { cwd: gitRoot, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-    );
+    const { stdout } = await git(gitRoot, ['log', `--since=${since.toISOString()}`, '--format=%H%x00%cI', '--no-merges']);
     const refs: CommitRef[] = [];
     for (const line of stdout.split('\n')) {
       if (!line.includes('\0')) continue;
@@ -148,11 +158,7 @@ export async function commitShasSince(gitRoot: string, since: Date): Promise<Com
  */
 export async function commitPaths(gitRoot: string, sha: string): Promise<string[] | null> {
   try {
-    const { stdout } = await exec(
-      'git',
-      ['show', '--name-only', '--format=', '--no-renames', '-z', sha],
-      { cwd: gitRoot, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-    );
+    const { stdout } = await git(gitRoot, ['show', '--no-ext-diff', '--no-textconv', '--name-only', '--format=', '--no-renames', '-z', sha]);
     return stdout.split('\0').filter(Boolean);
   } catch {
     return null;
@@ -166,11 +172,7 @@ export async function commitStat(
 ): Promise<{ additions: number; deletions: number; filesChanged: number }> {
   const stat = { additions: 0, deletions: 0, filesChanged: 0 };
   try {
-    const { stdout } = await exec(
-      'git',
-      ['show', '--numstat', '--format=', '--no-merges', sha],
-      { cwd: gitRoot, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-    );
+    const { stdout } = await git(gitRoot, ['show', '--no-ext-diff', '--no-textconv', '--numstat', '--format=', '--no-merges', sha]);
     for (const line of stdout.split('\n')) {
       if (!line.trim()) continue;
       const [added, removed] = line.split('\t');
