@@ -132,6 +132,10 @@ exits 0 when the device is not configured.
 
 ### Security
 
+- The `zod` range is now `^4.6.7`, so a global install can never resolve a version affected by
+  [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5). 0.6.1 fixed only the
+  lockfile, which `npm install -g` ignores.
+
 - **Labels are secret-redacted in every mode, `metadata` included.** `workflow_name`, `skill`,
   `subagent_type`, `agent_type`, `agent_kind`, `agent_id`, `tool_name`, `abort_reason`,
   `stop_reason`, `error_kind`, `model`, `plan_type`, `branch`, `project_name`, `repo.branch`,
