@@ -39,8 +39,10 @@ import { redact } from '../privacy/redact.js';
  * "CommandExecution"|"FileChange"|"McpToolCall",…}}}; user_message and
  * exec_command_end are gone. Each model response also writes a top-level
  * {"type":"token_usage_record","payload":{"response_id","usage",…}} that sums
- * exactly to the thread total, so those files are billed per response and the
- * gauge is not emitted for them (normalizeTokenUsageRecord).
+ * exactly to the thread total, so a file is billed per response from its first
+ * record on, and the gauge is not emitted after that (normalizeTokenUsageRecord).
+ * Keyed on the record itself, not cli_version: a build that writes none keeps
+ * the gauge.
  */
 export const CODEX_DIR = process.env['CODEX_HOME'] ?? join(homedir(), '.codex');
 const SESSIONS_DIR = join(CODEX_DIR, 'sessions');
@@ -124,9 +126,6 @@ export class CodexAdapter implements AgentAdapter {
       state.sessionId = str(payload['id']) ?? state.sessionId;
       state.version = str(payload['cli_version']);
       state.cwd = str(payload['cwd']) ?? state.cwd;
-      // A live rollout is first seen before its first token_usage_record is
-      // written; a gauge emitted then would bill on top of the records.
-      if (writesUsageRecords(state.version)) state.usageFromRecords = true;
       if (!state.sessionId) return [];
       // A fork or multi-agent v2 child starts from another thread's history.
       const historyBase = (payload['history_base'] ?? {}) as Record<string, unknown>;
@@ -501,7 +500,13 @@ interface FileState {
   calls: Map<string, string>;
   /** call_id → when the call was made, the floor for back-dating its result. */
   callStarts: Map<string, number>;
-  /** The file has token_usage_record lines: bill per response, not the gauge. */
+  /**
+   * A token_usage_record has been seen in this file (the first-read sniff, or
+   * live, the first record line): bill per response, not the gauge. No version
+   * cutoff — some builds that write item_completed still write no records.
+   * Codex writes a response's record before its token_count, so a live file
+   * never gauges a response it then also bills.
+   */
   usageFromRecords?: boolean;
   /** The file has item_completed lines: prompts, commands and edits come from items. */
   itemMode?: boolean;
@@ -512,15 +517,6 @@ interface FileState {
 
 const RECORD_MARKER = Buffer.from('"type":"token_usage_record"');
 const ITEM_MARKER = Buffer.from('"type":"item_completed"');
-
-/**
- * Codex builds from 0.150 bill per response (token_usage_record). Known from
- * session_meta, before the first record exists in a live file.
- */
-export function writesUsageRecords(cliVersion: string | undefined): boolean {
-  const m = /^(\d+)\.(\d+)\./.exec(cliVersion ?? '');
-  return m !== null && (Number(m[1]) > 0 || Number(m[2]) >= 150);
-}
 
 /**
  * Which rollout format a file is in, plus its session_meta cwd and version,
@@ -543,7 +539,7 @@ export function rolloutFormat(path: string): {
     const cwd = str(meta['cwd']);
     const version = str(meta['cli_version']);
     return {
-      usageFromRecords: data.includes(RECORD_MARKER) || writesUsageRecords(version),
+      usageFromRecords: data.includes(RECORD_MARKER),
       itemMode: data.includes(ITEM_MARKER),
       ...(cwd ? { cwd } : {}),
       ...(version ? { version } : {}),

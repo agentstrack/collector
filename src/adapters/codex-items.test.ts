@@ -181,11 +181,25 @@ describe('CodexAdapter, live and resumed rollouts', () => {
     usage: { input_tokens: 5000, cached_input_tokens: 0, output_tokens: 100 },
   });
 
-  it('does not bill a gauge seen before the first token_usage_record of a ≥0.150 rollout', () => {
-    // The file is first read before Codex has written any record.
-    const usage = ofType(run([meta('0.165.0'), tokenCount, record]), 'usage.reported');
+  const turn = line('2026-11-20T09:00:00.500Z', 'turn_context', { turn_id: 't1', model: 'gpt-6' });
+
+  it('bills a live file per record once records start, record before gauge', () => {
+    // First read sees only session_meta and the turn (no record yet on disk);
+    // Codex then writes each response's record before its token_count.
+    const usage = ofType(run([meta('0.165.0'), turn, record, tokenCount]), 'usage.reported');
     expect(usage).toHaveLength(1);
     expect(usage[0]!.event.payload).toMatchObject({ cumulative: false, usage: { input_tokens: 5000 } });
+  });
+
+  it('bills records only for a 0.165 rollout that has them', () => {
+    const usage = ofType(run([meta('0.165.0'), turn, record, tokenCount, tokenCount]), 'usage.reported');
+    expect(usage.map((e) => e.event.payload['cumulative'])).toEqual([false]);
+  });
+
+  it('keeps the gauge for a ≥0.150 rollout that writes no records', () => {
+    const usage = ofType(run([meta('0.155.0'), turn, tokenCount]), 'usage.reported');
+    expect(usage).toHaveLength(1);
+    expect(usage[0]!.event.payload['cumulative']).toBe(true);
   });
 
   it('keeps the gauge for an older rollout with no records', () => {
