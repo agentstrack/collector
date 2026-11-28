@@ -5,25 +5,25 @@
 [![npm version](https://img.shields.io/npm/v/@agentstrack/collector.svg)](https://www.npmjs.com/package/@agentstrack/collector)
 [![CI](https://github.com/agentstrack/collector/actions/workflows/ci.yml/badge.svg)](https://github.com/agentstrack/collector/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+[![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org)
 
-`@agentstrack/collector` turns the records Claude Code, Codex and OpenCode already keep on your
-machine into a normalized event stream:
+`@agentstrack/collector` turns the records Claude Code, Codex, OpenCode, Gemini CLI and Antigravity
+already keep on your machine into a normalized event stream:
 
 - **Tokens and cost** — input, cached input, cache creation, output and reasoning tokens, normalized across every agent. OpenCode's real settled provider cost comes through as `REPORTED`, not an estimate.
 - **Which account paid** — a stable, opaque account key per session, so a personal login and a work one never merge into one bill.
 - **What actually happened** — tool calls, commands, files changed with line counts, and the commits a session produced.
 - **Nothing you didn't agree to** — prompts and code are discarded on your machine, before anything is queued for upload.
 
-It **reads what the agent already wrote** — append-only logs for Claude Code and Codex, a read-only
-SQLite query for OpenCode. It does not install hooks, it does not wrap your agent, and it **never
+It **reads what the agent already wrote** — append-only logs for Claude Code, Codex, Gemini CLI and
+Kimi Code, a read-only SQLite query for OpenCode, a private copy of each Antigravity database. It does not install hooks, it does not wrap your agent, and it **never
 writes to `~/.claude/settings.json`, `~/.codex/hooks.json` or OpenCode's database**. Uninstalling is `npm rm -g` plus deleting one
 directory; nothing about your agent setup changes.
 
 **You do not have to take that on faith.** It is Apache-2.0 and this is the whole of it — the part
 that runs on your machine and reads your files. Prompts and code are dropped locally, before the
-upload queue, and `agentstrack sync --dry-run --print` shows you the literal JSON that would be sent
-before anything is: [Verify it yourself](#verify-it-yourself).
+upload queue, and `agentstrack sync --dry-run --print` shows you the literal JSON that would be sent,
+without uploading any of it: [Verify it yourself](#verify-it-yourself).
 
 ---
 
@@ -49,26 +49,27 @@ Next: agentstrack start
 
 ```console
 $ agentstrack status
-AgentsTrack collector v0.1.0
+AgentsTrack collector v0.7.0
   Logged in:   yes
   API:         https://api.agentstrack.ai
   Collector:   3f9a1e6c-1c4b-4c7e-9d0f-2a5b8c1d7e40
   Privacy:     analytics
   Queue depth: 0
   Service:     installed
-  Running:     no
+  Running:     yes
 
 Agents
-  ✓ claude_code    134 transcripts
-  ✓ codex          13 transcripts
+  ✓ claude_code    134 sessions
+  ✓ codex          13 sessions
 ```
 
-`Running: no` with `Service: installed` is normal — `Running` tracks a **foreground** collector
-(`agentstrack start --foreground`), which is the only mode that writes a pidfile. The background
-service is supervised by launchd/systemd; `Service: installed` is the line that matters for it.
+The background service runs `agentstrack start --foreground` under launchd/systemd, so a running
+service shows `Running: yes`. `Running: no` with `Service: installed` means the supervisor has not
+started it yet or it exited; check the log.
 
 **Your existing history is picked up automatically.** On its first pass the collector reads every
-agent transcript modified in the last 7 days, from byte zero. There is no separate backfill step.
+agent transcript modified in the last 7 days (`tracking.max_age_days`), from byte zero. There is no
+separate backfill step; raise `max_age_days` to import older history.
 
 Nothing showing up? Run `agentstrack doctor`.
 
@@ -82,14 +83,15 @@ Nothing showing up? Run `agentstrack doctor`.
 | Token counts: input, cached input, cache creation, output, reasoning | Upload prompt text — unless you explicitly set `privacy.mode: full` |
 | Model id, provider, stop reason | Upload file contents or diffs — unless you explicitly set `privacy.code_content: full` |
 | Tool names, tool call ids, success/failure | Send tool output or command output |
-| Shell commands, with secrets redacted locally | Send a command that still contains a matched credential |
-| File paths, **relative to the project root by default** | Send absolute paths — which leak your username and your clients' names — unless you opt in |
+| Shell commands: the **whole command line** in the default `analytics` mode (and `full`), secret-redacted locally; the binary name only in `metadata` | Send a command that still contains a matched credential |
+| File paths, **relative to the project root** in every mode (the default `file_paths: relative`) | Send absolute paths — which leak your username and your clients' names — unless you opt in |
 | Lines added/removed per edit, computed locally from the tool input | Send the lines themselves |
 | Git branch, commit SHA, additions/deletions/files changed | Send your git remote URL (only a SHA-256 of it) or commit messages and diffs |
 | A session title — the first line of the prompt, secret-redacted and then capped at 120 chars (`analytics` mode and above) | Send the rest of the prompt those titles were taken from |
 | Your hostname, OS and release, arch, Node version, a coarse machine kind (`workstation` / `server` / `container` / `ci`) and each detected agent's version — at registration and with each health report | Show your hostname or IP address in the product — see [Machine info](#machine-info) |
 | That local redaction fired: which pattern matched and how many times (`secrets_redacted`), in every privacy mode | Send the secret it matched — not the text, not a prefix of it, not a hash of it, not the characters around it |
 | Plan headroom: the used % and reset time of your plan's rate-limit windows, as Codex reports them (Claude Code only via the Open Island opt-in) | Send Codex's credit balance |
+| Which account a session ran under: an opaque key in every mode, plus the account's email or display name and org name in `analytics` and `full` | Send any credential from the agent's auth files |
 | Which skill, sub-agent type or workflow a Claude Code session invoked, and which events came from a sub-agent | Copy the `Agent` call's prompt or a workflow script's body out of the call (a sub-agent transcript's own opening prompt follows `privacy.prompts` like any other prompt) |
 | | Install hooks or modify `~/.claude/settings.json` / `~/.codex/hooks.json` |
 | | Send `organization_id` or `user_id` — they are not in the wire format at all |
@@ -106,9 +108,12 @@ Nothing showing up? Run `agentstrack doctor`.
 ### Verify it yourself
 
 Do not take the table above on trust. **`agentstrack sync --dry-run --print` prints the exact,
-post-redaction JSON that would be uploaded, and sends nothing.** It is the single most useful command
-in the tool: the privacy claims are checkable on your own machine, against your own sessions, before
-a single byte leaves it.
+post-redaction JSON that would be uploaded, and uploads none of it.** It scans your transcripts the
+way the daemon would, against a throwaway copy of the spool, so it shows what is queued plus what the
+next scan would add — and writes nothing back. The one request it makes is
+`GET /v1/collector/config`, so the org policy it applies is the one the daemon would. It is the single
+most useful command in the tool: the privacy claims are checkable on your own machine, against your
+own sessions, before a single event leaves it.
 
 ```console
 $ agentstrack sync --dry-run
@@ -182,7 +187,7 @@ agentstrack doctor --json               # structured diagnostics, safe to paste 
                                    ▼
        ┌────────────────────────┐
        │    privacy pipeline    │  mode-based content strip
-       │                        │  → 16 built-in secret rules + org rules
+       │                        │  → built-in secret rules + org rules
        │                        │  → path normalization
        │                        │  → raw content DISCARDED HERE
        └───────────┬────────────┘
@@ -210,8 +215,8 @@ end), it is re-read from the start rather than silently skipped. Re-reading neve
 every event's `event_id` is derived from the file, the line's byte offset and the line's content, so
 the server's dedupe absorbs a replay. A Claude Code `model.response` is keyed on its `message.id`
 instead, since one response spans several lines; an idle `session.ended` on the agent, session and
-last-activity time. Only events with no source line (`git.commit`, database-backed agents) get a
-random id.
+last-activity time; a `git.commit` on the session and the commit SHA. OpenCode's events, which come
+from database rows rather than lines, are the only ones that still get a random id.
 
 **Big files are streamed, not slurped.** Transcripts are read in 4 MB chunks with the partial line
 carried across the boundary, at most 64 MB per file per scan so a first import keeps yielding to the
@@ -230,7 +235,8 @@ either.
 failure policy runs on the wave's collected outcomes rather than inside each request — so four
 failing siblings cost one backoff step, not four, and a sibling's success cannot undo a `413`
 shrink. A `413` halves the batch size once (never above the server's `max_batch_events`) and it
-creeps back up on success. A `5xx`, a timeout, a `408` or a `429` sets the next upload time with
+creeps back up on success. A `400` or `422` on a batch of more than one event halves it the same way,
+so one bad event ends up alone and only it is struck. A `5xx`, a timeout, a `408` or a `429` sets the next upload time with
 jittered exponential backoff (1s base, capped at 5 minutes, or the server's `Retry-After` if longer)
 — the daemon never sleeps on it, so tailing continues meanwhile. A daemon tick sends at most five
 waves before scanning again. Three responses **pause** uploads instead: a `401`/`403` (the key, not
@@ -259,13 +265,22 @@ Two properties of that deletion are worth stating explicitly, because both are e
 |---|---|---|---|
 | Token counts, timings, models, costs | ✅ | ✅ | ✅ |
 | Tool names and outcomes | ✅ | ✅ | ✅ |
-| Commands (secret-redacted) | ✅ | ✅ | ✅ |
-| File paths, line counts | ✅ | ✅ | ✅ |
+| Commands | binary name only | ✅ full command line, secret-redacted | ✅ full command line, secret-redacted |
+| File paths (relative to the project), line counts | ✅ | ✅ | ✅ |
 | Git branch / SHA / remote **hash** | ✅ | ✅ | ✅ |
-| Locally derived session titles | ❌ stripped | ✅ | ✅ |
+| Locally derived session titles, sub-agent descriptions | ❌ stripped | ✅ | ✅ |
 | Error messages | ❌ stripped | ✅ | ✅ |
+| Account email / display name and org name | ❌ stripped (opaque key only) | ✅ | ✅ |
 | Prompt text | ❌ never | ❌ never | ⚠️ only with `privacy.prompts: full` |
 | File contents / diffs | ❌ never | ❌ never | ⚠️ only with `privacy.code_content: full` |
+
+Be clear about what the default sends. In `analytics`, a shell command is the **whole command line**
+— arguments, hostnames, paths and all — with the built-in and org secret rules applied; set
+`privacy.shell_arguments: never` to send only the binary name, which is what `metadata` always does.
+A file path is relative to the project root (`src/auth.ts`) in every mode unless you change
+`privacy.file_paths`. The account's label — usually an email — travels with `session.started` and
+`user.prompted` in `analytics` and `full`. Short labels (tool, skill and workflow names, models,
+branch and project names, abort reasons) are sent in every mode, secret-redacted.
 
 `analytics` is the honest middle: the title is computed **on your machine** from the prompt, and then
 the prompt is deleted. The server receives `"fix flaky auth test"`, never the 900 words you typed.
@@ -288,15 +303,28 @@ nags you to.
 ### Org policy is a ceiling, never a floor
 
 Your organization's default mode arrives in the `POST /v1/collector/register` response at login, and
-is re-read from `GET /v1/collector/config` on every daemon start. **A local setting that is stricter
-always wins.** An org set to `full` cannot widen a laptop configured for `metadata`; an org set to
-`metadata` does clamp a laptop asking for `full`. The clamp is one shared function so login and the
-daemon cannot drift.
+is re-read from `GET /v1/collector/config` when the daemon starts and every 10 minutes after (every
+minute until the first read succeeds). **A local setting that is stricter always wins.** An org set
+to `full` cannot widen a laptop configured for `metadata`; an org set to `metadata` does clamp a
+laptop asking for `full`. The clamp is one shared function so login and the daemon cannot drift.
+
+The last policy fetched is kept in `spool.db`, so a collector that starts with no network still
+applies it. A mode the collector does not recognise counts as `metadata`. `config.yaml` keeps your
+own setting; the clamp is applied on every run.
+
+**Until a policy is known, nothing is collected.** Privacy is applied as events are queued, so a
+registered device that has never fetched its org policy — and has no readable stored copy — reads no
+transcripts and uploads nothing until `GET /v1/collector/config` succeeds once. Read offsets do not
+move meanwhile, so nothing is lost; the first scan after the fetch catches up. The log says
+`No org policy yet (server config never fetched) — not reading or uploading until it is`.
 
 ### Built-in secret redaction
 
-Every free-text field (`prompt_text`, `derived_title`, `message`, `command`, `description`) passes
-through these 16 rules, most-specific first, on your machine:
+Every free-text field (`prompt_text`, `derived_title`, `message`, `command`, `description`) and every
+label that travels in all modes (`tool_name`, `skill`, `subagent_type`, `agent_type`, `agent_kind`,
+`agent_id`, `workflow_name`, `model`, `plan_type`, `stop_reason`, `error_kind`, `abort_reason`,
+`branch`, `project_name`, and `git.branch_changed`'s `from` / `to`) passes through these rules,
+most-specific first, on your machine:
 
 | Rule | Catches |
 |---|---|
@@ -308,24 +336,43 @@ through these 16 rules, most-specific first, on your machine:
 | `stripe_key` | `sk_live_`, `sk_test_`, `rk_live_`, `rk_test_` |
 | `aws_access_key` | `AKIA…`, `ASIA…` |
 | `google_api_key` | `AIza…` |
+| `google_oauth_token` | `ya29.…` |
+| `npm_token` | `npm_…` |
+| `gitlab_token` | `glpat-…` |
+| `huggingface_token` | `hf_…` |
+| `sendgrid_key` | `SG.….…` |
 | `agentstrack_key` | our own `at_live_…` / `at_test_…` keys |
 | `private_key` | any `-----BEGIN … PRIVATE KEY-----` block |
 | `jwt` | three-segment `eyJ…` tokens |
 | `bearer_header` | `Bearer <token>` → `Bearer [REDACTED]` |
+| `basic_auth_header` | `Authorization: Basic <credentials>` |
+| `token_auth_header` | `Authorization: Token <token>` |
+| `cookie_header` | `Cookie:` / `Set-Cookie:` — the whole header value |
 | `basic_auth_url` | `https://user:pw@host` → `https://[REDACTED]@host` |
-| `inline_password_flag` | `-pSECRET`, `--password=SECRET`, `--password "SECRET"` |
 | `env_assignment` | `*SECRET*=`, `*TOKEN*=`, `*PASSWORD*=`, `*PASSWD*=`, `*APIKEY*=`, `*API_KEY*=`, `*ACCESS_KEY*=`, `*PRIVATE_KEY*=` |
+| `inline_password_flag` | `--password=SECRET`, `--password "SECRET"`; `-pSECRET` on `mysql`, `mongosh`, `sshpass` and similar |
+| `secret_flag` | `--token`, `--api-key`, `--apikey`, `--secret`, `--*-secret`, `--secret-key`, `--auth-token`, `--access-token` |
+| `curl_user` | `curl -u user:pass` / `--user user:pass` |
+| `secret_assignment` | `key=value`, `key: value`, `?key=value&` and JSON `"key": "value"` (escaped JSON too), any case, where the key ends in `secret`, `token`, `password`, `pwd`, `api_key`, `access_key`, `private_key` or `secret_key`; `pass` / `auth` only with `=` or as a quoted JSON key |
 | `generic_hex_secret` | bare hex strings of 40+ characters |
 
-A match is replaced in place, and most rules substitute `[REDACTED:rule_name]`. Five do not:
-`bearer_header` → `Bearer [REDACTED]` and `basic_auth_url` → `scheme://[REDACTED]@host` keep the
-surrounding syntax so the shape of the command survives, `env_assignment` → `NAME=[REDACTED]` and
-`inline_password_flag` → `--password=[REDACTED]` keep the variable or flag name, and
-`generic_hex_secret` substitutes the shorter `[REDACTED:hex]`. Your
-organization can add patterns server-side; an org pattern that is malformed, longer than 256
-characters, or using a backreference is skipped, the common catastrophic nested-quantifier shapes
-(`(a+)+`, `(a|aa)+`, `((a+)b)+`) are rejected — a heuristic, not a proof — and org patterns are
-matched against at most the first 64 KB of any value.
+Prefixed tokens are matched even inside identifiers — `mcp__npm_<token>__get`, `srv_hf_<token>` —
+because `_` would otherwise hide them from a word boundary.
+
+A match is replaced in place, and most rules substitute `[REDACTED:rule_name]`. Some keep the
+surrounding syntax so the shape of the command survives: `bearer_header` → `Bearer [REDACTED]`,
+`basic_auth_url` → `scheme://[REDACTED]@host`, `env_assignment` → `NAME=[REDACTED]`, and the header,
+flag and assignment rules keep their header, flag or key (`--password=[REDACTED]`,
+`Cookie: [REDACTED]`, `"apiKey": [REDACTED]`). `generic_hex_secret` substitutes the shorter
+`[REDACTED:hex]`. Fields with a length cap (`message` 1000, `abort_reason` 50, `derived_title` 120)
+are cut **after** redaction, never before.
+
+Your organization can add patterns server-side. An org pattern that is malformed, longer than 256
+characters, uses a backreference, uses a common catastrophic nested-quantifier shape (`(a+)+`,
+`(a|aa)+`, `((a+)b)+`), or has more than one unbounded quantifier (`*`, `+`, `{n,}`, `{n,m}` with
+m ≥ 100) is skipped and logged by its index and the reason — never its pattern. These checks are a
+heuristic, not a proof, so org patterns are also matched against at most the first 64 KB of any
+value.
 
 Redaction is defence in depth, not the primary control. The primary control is that in `metadata`
 and `analytics` modes the content is **deleted locally** and never enters the pipeline at all.
@@ -389,8 +436,14 @@ privacy:
     - "/Users/me/personal"
 ```
 
-Prefix match on the session's working directory, `~` expands. An excluded project produces **no
-events at all** — not even counts. Edit the YAML and restart the collector.
+Prefix match on the session's working directory (or the repository path an adapter reports), on
+whole path segments — `~/work/api` excludes `~/work/api/src` but not `~/work/api-docs`. `~` expands.
+An excluded project produces **no events at all** — not even counts. Edit the YAML and restart the
+collector.
+
+**It fails closed.** While the list is non-empty, an event from any adapter that names neither a
+working directory nor a repository path is dropped, because it cannot be shown not to belong to an
+excluded project. The log records how many were dropped.
 
 Commit reporting follows the same rule. A commit is not reported if any file it changes is under an
 excluded path, so a monorepo subfolder on the list keeps its commits out of the feed even when
@@ -404,13 +457,19 @@ another project in the same repository is tracked.
 |---|---|
 | `agentstrack login <api-key>` | Register this device, store the key, apply the org privacy ceiling |
 | `agentstrack logout [--purge]` | Remove the stored key; `--purge` also deletes the unsent spool |
-| `agentstrack start [-f]` | Install + start the login service, or run in this terminal with `-f` |
+| `agentstrack start [-f] [--agent <id>]` | Install + start the login service, or run in this terminal with `-f`; `--agent` (with `-f` only) limits the run to those agents |
 | `agentstrack stop` | Stop the collector and remove its service unit |
-| `agentstrack status [--json]` | Health, queue depth, detected agents |
+| `agentstrack status [--json]` | Health, queue depth, detected agents. Exits 0 even when not configured |
 | `agentstrack doctor [--json]` | Diagnose setup problems; `--json` is what bug reports want |
+| `agentstrack summary [--days N] [--json]` | Your own totals from AgentsTrack for the last N days (1–30, default 7) |
 | `agentstrack config [--path\|--show-effective]` | Print the config (API key masked) |
-| `agentstrack sync [--dry-run [--print]]` | Upload queued events now, or show what would be sent |
+| `agentstrack sync [--full]` | Upload queued events now; `--full` re-reads every transcript first |
+| `agentstrack sync --dry-run [--print]` | Scan and show what would be sent, without uploading or saving anything |
 | `agentstrack service <install\|uninstall>` | Manage the login service without starting a collector |
+
+`--verbose`, before or after any command, adds event counts per scan, batch sizes and server status
+codes to the log and to stderr (prefixed `[verbose]`). It never prints payloads, prompts, paths or
+keys.
 
 ### `login`
 
@@ -435,7 +494,7 @@ adapter cannot cheaply establish a version at detection time the field is simply
 than filled with a placeholder, so a missing version in the dashboard means "not reported", never
 "not detected".
 
-Both shipping adapters report a real version. Claude Code reads it from a transcript
+Claude Code and Codex both report a real version. Claude Code reads it from a transcript
 (e.g. `2.1.247`); Codex reads `session_meta.cli_version` from its newest rollout
 (e.g. `0.149.0-alpha.4.3`). The same value is attached to every event as `agent_version`.
 
@@ -455,8 +514,25 @@ respawning it every few seconds (launchd `KeepAlive`/`SuccessfulExit`, systemd `
 with a 5-in-5-minutes start limit). `-f` / `--foreground` runs in the terminal instead — best for a
 first run, and the only mode where `status` reports `Running: yes`.
 
-`agentstrack stop` removes the service unit *and* signals a foreground collector. There is no
-"stop but keep the unit"; use `agentstrack service install` to put it back.
+`--agent <id>` (repeatable, or comma-separated: `--agent claude_code,codex`) runs only those agents
+for this foreground run, overriding `tracking.agents`. It is refused without `--foreground`, because
+the service starts without flags and would not see it; an unknown id is refused too. Both exit 2.
+
+`agentstrack stop` removes the service unit *and* signals a foreground collector, and says
+`Collector was not running.` when there was neither. There is no "stop but keep the unit"; use
+`agentstrack service install` to put it back.
+
+### `summary`
+
+```
+agentstrack summary [--days N] [--json]
+```
+
+Your own totals from AgentsTrack — sessions, output tokens and cost — for widgets and scripts;
+`--json` prints the server's full answer, including the cost basis and per-agent and per-day rows. The API key stays inside the collector; the caller sees only the
+totals. `--days` must be a whole number from 1 to 30 (default 7); anything else exits 2. Not logged
+in exits 1 (`{"error":"not_logged_in"}` with `--json`); a server without
+`GET /v1/collector/summary` exits 2 (`{"error":"unsupported_server"}`).
 
 ### `doctor`
 
@@ -468,10 +544,13 @@ Configuration
   ✓ device registered
 
 Agents
-  ✓ claude_code transcripts found
+  ✓ claude_code sessions found
     225 file(s) modified in the last 7 days   # window is tracking.max_age_days (default 7)
-  ✓ codex transcripts found
-    3 file(s) modified in the last 7 days     # window is tracking.max_age_days (default 7)
+  ✓ codex sessions found
+    3 file(s) modified in the last 7 days
+  - opencode not installed
+  - antigravity not installed
+  - gemini_cli not installed
 
 Connectivity
   ✗ API reachable at https://api.agentstrack.ai
@@ -484,13 +563,14 @@ Queue
 1 problem(s) found.
 ```
 
-Exit code is non-zero when there is a problem, so it works in a monitoring check.
+Exit code is non-zero when there is a problem, so it works in a monitoring check. An agent that is
+not installed is listed, not counted as a problem; having none of `tracking.agents` installed is.
 `agentstrack doctor --json` prints the structured form, which is what the bug template asks for:
 
 ```json
 {
-  "version": "0.1.0",
-  "node": "v22.22.0",
+  "version": "0.7.0",
+  "node": "v24.11.0",
   "platform": "darwin-arm64",
   "configured": true,
   "logged_in": true,
@@ -520,6 +600,7 @@ collector actually runs with:
 ```console
 $ agentstrack config --show-effective
 api_url: https://api.agentstrack.ai
+auto_update: true
 privacy:
   mode: analytics
   prompts: local_summary_only
@@ -528,6 +609,7 @@ privacy:
   shell_arguments: redact_secrets
   excluded_projects: []
 tracking:
+  max_age_days: 7
   idle_timeout_seconds: 120
   git_metadata: true
   process_metrics: true
@@ -543,32 +625,46 @@ upload:
   batch_size: 100
   interval_seconds: 30
   max_retries: 8
+  concurrency: 4
 ```
 
 There is no `config set` — edit the YAML. An invalid config is a **hard error**, never a silent
-fallback to defaults, so a typo cannot quietly widen your privacy mode.
+fallback to defaults, so a typo cannot quietly widen your privacy mode; the error lists each bad key
+as `path: message`. An **unknown** key is accepted, so a config written by a newer collector still
+loads, but it prints `unknown config key '…' is ignored` — a misspelt `privacy.excluded_project`
+is no longer silent.
 
 ### `sync`
 
-Drains the spool once and exits — useful after a network outage, or from a cron job on a machine
-where you would rather not run a daemon. It does **not** take a time window; the daemon's own scan is
-what reads new transcript lines.
+Scans once, drains the spool and exits — useful after a network outage, or on a machine where you
+would rather not run a daemon. When a collector is already running (`status` shows `Running: yes`),
+`sync` skips the scan, says the running collector reads new lines itself, and only uploads what is
+queued: two readers of the same files would each resume from their own checkpoints. It does **not**
+take a time window.
 
 ```console
 $ agentstrack sync
 ✓ Queue is already empty.
 
 $ agentstrack sync --dry-run
-✓ Nothing queued — nothing would be sent.
+✓ Nothing queued and nothing new in transcripts — nothing would be sent.
 ```
 
 With a backlog it prints `Uploading <n> queued events…` and then either `✓ Uploaded <n> events.` or,
-if some remain, a warning naming the log — and exits non-zero, so it is safe to run from cron.
+if some remain, a warning naming the log — and exits non-zero, so it is safe to run from cron. If the
+server rejects the API key it says so and exits 1.
 
-`--dry-run` sends nothing at all and prints a breakdown by event type; `--print` adds the full
-post-redaction JSON body of each one — see [Verify it yourself](#verify-it-yourself). Both inspect
-the head of the queue, up to `upload.batch_size` events, so `100 event(s) would be sent` on a large
-backlog means "the next batch", not "the whole spool" — `agentstrack status` reports the true depth.
+`--full` clears the read checkpoints, re-reads every transcript inside `tracking.max_age_days` and
+uploads the result; events the server already holds come back as duplicates and are not stored
+twice. It fetches the org policy before scanning.
+
+`--dry-run` uploads nothing and prints a breakdown by event type; `--print` adds the full
+post-redaction JSON body of each one — see [Verify it yourself](#verify-it-yourself). It copies the
+spool to a temporary directory, runs one scan against the copy (fetching the org policy first) and
+lists **every** event in it: what is already queued plus what the next scan would add. The real
+spool, its queue and its read checkpoints are not touched, and the copy is deleted afterwards —
+on Ctrl-C too.
+`--full` is ignored with `--dry-run`, with a notice.
 
 ---
 
@@ -583,6 +679,7 @@ is a valid config. This is the complete set:
 api_url: https://api.agentstrack.ai      # change for a self-hosted instance
 api_key: at_live_xxxxxxxxxxxxxxxx_xxxx   # written by `agentstrack login`. Never commit.
 collector_id: 3f9a1e6c-…                 # assigned by the server at registration
+auto_update: true                        # install newer releases of this package by itself (global npm installs only)
 
 # --- Privacy ------------------------------------------------------------
 privacy:
@@ -608,24 +705,32 @@ privacy:
   file_paths: relative
 
   # never | redact_secrets (default) | full
-  # `never` truncates a command to its first whitespace token. The other two
-  # keep the command line; secret redaction is applied either way.
+  # `never` sends only the binary name (leading VAR=value and sudo/env/nohup/
+  # time wrappers skipped). The other two keep the whole command line; secret
+  # redaction is applied either way, so `full` behaves like `redact_secrets`.
+  # `metadata` mode sends the binary name only, whatever this says.
   shell_arguments: redact_secrets
 
-  # Prefix match on the session's working directory. `~` expands.
-  # An excluded project produces no events of any kind.
+  # Prefix match on whole path segments of the session's working directory.
+  # `~` expands. An excluded project produces no events of any kind, and while
+  # this list is non-empty an event with no known project is dropped too.
   excluded_projects: []
 
 # --- Tracking -----------------------------------------------------------
 tracking:
-  # Read by the server, not by the collector — see "Roadmap". 30–3600.
+  # How far back to look for transcript files, by modification time. 1–3650.
+  # Raise it once to import older history, then put it back.
+  max_age_days: 7
+
+  # A session quiet this long gets a `session.ended` (reason: timeout). 30–3600.
   idle_timeout_seconds: 120
 
   # Read git branch, project root and a HASH of the remote; poll `git log` for
-  # commits made during a session. `false` means no git process is ever spawned.
+  # commits made during a session; emit git.branch_changed. `false` means no git
+  # process is ever spawned.
   git_metadata: true
 
-  # Not implemented yet — see "Roadmap".
+  # Deprecated: accepted for old configs and has no effect. `false` prints a warning.
   process_metrics: true
 
   # Read Claude Code's 5h/7d plan windows from Open Island's
@@ -634,9 +739,13 @@ tracking:
   open_island_rate_limits: false
 
   # Which adapters to run. Removing one stops it being read entirely.
+  # kimi_code is opt-in. `start --foreground --agent <id>` overrides this for one run.
   agents:
     - claude_code
     - codex
+    - opencode
+    - antigravity
+    - gemini_cli
 
 # --- Upload -------------------------------------------------------------
 upload:
@@ -645,6 +754,7 @@ upload:
   max_retries: 8         # non-retryable failures before an event is DELETED. 0–20;
                          # 0 is clamped to 1, since "zero attempts allowed" would
                          # match every queued event on the first failure.
+  concurrency: 4         # batches uploaded at once. 1–8.
 ```
 
 Environment overrides: `AGENTSTRACK_HOME` (all local state), `CLAUDE_CONFIG_DIR` (default
@@ -677,12 +787,12 @@ identical things:
 | Session start | ➖ inferred from the first event | ✅ from `session_meta` | ✅ from the `session` row |
 | Session end | ➖ inferred | ➖ inferred | ✅ on archive or compaction |
 | Prompts / titles | ✅ | ✅ | ✅ (OpenCode names its own sessions) |
-| Per-response token usage | ✅ `model.response` with full cache breakdown | ➖ cumulative snapshots only | ➖ cumulative per-session totals only |
+| Per-response token usage | ✅ `model.response` with full cache breakdown | ✅ per `token_usage_record` where the rollout writes them; ➖ cumulative snapshots on older rollouts | ➖ cumulative per-session totals only |
 | **Provider-reported cost** | ➖ estimated from a rate card | ➖ estimated | ✅ **`REPORTED` — the real settled charge** |
 | Turn boundaries | ➖ not logged | ✅ `agent.turn.started` / `.ended` | ➖ not emitted |
 | Tool calls | ✅ | ✅ (incl. `custom_tool_call`) | ✅ terminal event with a real duration |
 | Commands | ✅ from `Bash` tool input | ✅ with exit code and duration | ✅ from the `bash` tool's input |
-| File changes + line counts | ✅ from `Edit`/`Write`/`NotebookEdit` inputs | ✅ parsed from the `apply_patch` body | ✅ from `edit`/`write` tool inputs |
+| File changes + line counts | ✅ from `Edit`/`MultiEdit`/`Write`/`NotebookEdit` inputs | ✅ parsed from the `apply_patch` body | ✅ from `edit`/`write` tool inputs |
 | File reads | ✅ from the `Read` tool | ➖ heuristic, from `cat`/`head`/`tail`/`sed`/`nl`/`bat`/`less` | ✅ from the `read` tool |
 | Agent errors | ➖ not logged | ✅ `error` | ➖ not emitted |
 | Commits | ✅ (from `git log`, not the transcript) | ✅ (same) | ✅ (same) |
@@ -765,9 +875,13 @@ Or set `api_url` in `config.yaml` and restart. These are the only endpoints it c
 | Method | Path | When |
 |---|---|---|
 | `POST` | `/v1/collector/register` | `login`, and once on daemon start if `collector_id` is missing |
-| `GET` | `/v1/collector/config` | `doctor`, and each daemon start — org privacy ceiling + redaction rules. Not called by `login`: the register response already carries the ceiling |
+| `GET` | `/v1/collector/config` | Daemon start, then every 10 minutes (every minute until it first succeeds); `sync` when it scans, `sync --full`, `sync --dry-run` and `doctor` — org privacy ceiling, redaction rules, accepted event types. Not called by `login`: the register response already carries the ceiling |
 | `POST` | `/v1/collector/health` | Every 60s while running — queue depth, version, detected agents |
-| `POST` | `/v1/events/batch` | Every `upload.interval_seconds`, or when the queue reaches `batch_size` |
+| `POST` | `/v1/events/batch` | Every `upload.interval_seconds`, or when the queue reaches `batch_size`; `sync` |
+| `GET` | `/v1/collector/summary` | `agentstrack summary` only |
+
+Auto-update (`auto_update: true`) also asks `https://registry.npmjs.org` for this package's latest
+version every six hours, and installs it from there.
 
 Authentication is `Authorization: Bearer <api_key>` on every request. Batch bodies over 1 KB are
 gzipped (`content-encoding: gzip`).
@@ -790,7 +904,12 @@ gzipped (`content-encoding: gzip`).
    ```
 3. Is the project on your exclusion list? `agentstrack config --show-effective | grep -A3 excluded`
 4. Is the agent enabled under `tracking.agents`?
-5. Is anything queued but stuck? `agentstrack sync --dry-run` shows the head of the queue.
+5. Is anything queued but stuck, or is a session being filtered out? `agentstrack sync --dry-run`
+   shows everything queued plus what the next scan would add.
+6. Does the log say `No org policy yet`? A registered device collects nothing until it has reached
+   `GET /v1/collector/config` once — check connectivity with `agentstrack doctor`.
+7. Is `excluded_projects` set? Then events with no known working directory are dropped, and the log
+   says how many.
 
 ### The queue is not draining
 
@@ -802,8 +921,9 @@ gzipped (`content-encoding: gzip`).
 | `Uploads paused (auth)` — `403` | Key lacks ingest permission | Issue a new key; nothing was dropped |
 | `Uploads paused (quota)` | Org over its monthly event cap | Events stay spooled and resume when the cap resets or the plan changes |
 | `Uploads paused (schema)` | Server rejects every event — collector older than the API | Upgrade the collector; nothing was dropped |
-| `fetch failed`, `ETIMEDOUT` | Network, VPN or proxy | Set `HTTPS_PROXY`; events keep spooling meanwhile |
+| `fetch failed`, `ETIMEDOUT`, `request timed out after Ns` | Network, VPN or proxy | Set `HTTPS_PROXY`; events keep spooling meanwhile |
 | `Server rejected the batch as too large` | Batch above the server's limit | Automatic — batch size halves and recovers |
+| `Server rejected the batch as invalid` | A `400`/`422` on a multi-event batch | Automatic — the batch is halved until the bad event is alone; only it is struck |
 | `Batch permanently rejected: … (dropped N)` | Non-retryable `4xx` | N events **in that batch** hit `max_retries` and were deleted. Nothing outside the batch is touched. Check the API version matches the collector's schema. |
 
 Retryable failures never lose anything: `spool.db` is durable across restarts and reboots, and
@@ -841,8 +961,9 @@ tail -f ~/.agentstrack/collector.log
 grep -i "error\|failed\|rejected" ~/.agentstrack/collector.log | tail -20
 ```
 
-The log records counts, queue depths and `event_id`s — never payloads, prompts, code or keys. That is
-what makes it safe to attach to an issue. It rotates once at 5 MB to `collector.log.1`; a scan pass
+The log records counts, queue depths, status codes and `event_id`s — never payloads, prompts, code,
+keys or a server's error body (at most its short `error` code). That is what makes it safe to attach
+to an issue. Run with `--verbose` for per-scan event counts and per-batch status codes. It rotates once at 5 MB to `collector.log.1`; a scan pass
 writes one `Queued N events across M files` line, not one per file. Please attach `agentstrack doctor --json` too.
 
 ### Complete reset
@@ -858,19 +979,19 @@ agentstrack start
 
 ## Roadmap
 
-Honest list of things that are **not** in 0.1.0, so you do not go looking for them.
+Honest list of things that are **not** in 0.7.0, so you do not go looking for them.
 [ROADMAP.md](./ROADMAP.md) has the same list with the design constraints and what "help wanted"
 means for each.
 
-- **Backfill window control** (`sync --since 30d`). Today the window is `tracking.max_age_days` (default 7) for every run; there is no per-invocation override.
 - **`config get` / `config set` / `config edit`** — edit the YAML by hand for now.
-- **`--verbose` logging** and per-run agent selection (`start --agent codex`); use `tracking.agents`.
+- **Per-run backfill window** (`sync --since 30d`). The window is `tracking.max_age_days` (default 7)
+  for every run.
 - **Local time accounting.** Human-active / agent-active / idle windows are derived server-side from the event stream; the collector uses `tracking.idle_timeout_seconds` only to decide when a quiet session has ended.
-- **Process metrics.** `tracking.process_metrics` is accepted and ignored.
-- **`heartbeat`, `model.request` and `git.branch_changed`** are in the schema but no adapter emits them yet. `session.ended` is not read from any Claude Code or Codex transcript either — the daemon emits it after `tracking.idle_timeout_seconds` of quiet (`reason: timeout`) or on shutdown (`reason: unknown`).
+- **Process metrics.** `tracking.process_metrics` is deprecated and has no effect.
+- **`heartbeat` and `model.request`** are in the schema but nothing emits them. `session.ended` is not read from any Claude Code or Codex transcript — the daemon emits it after `tracking.idle_timeout_seconds` of quiet (`reason: timeout`).
+- **`shell_arguments: full`** behaves exactly like `redact_secrets`: commands are always secret-redacted.
 - **Local task classification** (`task_category`) — the field exists in the schema; the collector only derives a title.
 - **Windows.** The service installer covers launchd and systemd only; `--foreground` works anywhere Node 24+ does.
-- **`MultiEdit`.** The Claude Code adapter derives file changes from `Edit`, `Write`, `NotebookEdit` and `Read`; a `MultiEdit` call is still recorded as `tool.started`/`tool.completed`, but produces no `file.changed` events and no line counts.
 
 ---
 

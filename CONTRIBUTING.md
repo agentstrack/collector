@@ -17,7 +17,7 @@ git clone https://github.com/agentstrack/collector.git
 cd collector
 npm install
 
-npm test            # vitest run  — 177 tests today
+npm test            # vitest run
 npm run test:watch  # vitest
 npm run typecheck   # tsc --noEmit
 npm run build       # tsc -> dist/, chmod +x dist/cli.js
@@ -167,7 +167,7 @@ id and model that only appear on the first lines of a rollout.
 
 #### Agents that keep a database instead of a log
 
-Some agents (OpenCode) record everything in SQLite. There are no lines, so `normalize()` returns `[]`
+Some agents (OpenCode, Antigravity) record everything in SQLite. There are no lines, so `normalize()` returns `[]`
 and the adapter implements **`poll()`** instead; the daemon drives it on the same 5-second scan cycle,
 under the same `tracking.agents` gating, the same `excluded_projects` filter and the same privacy
 pipeline. Three rules:
@@ -207,11 +207,12 @@ one active account per provider), set `account` on the `NormalizedEvent` and it 
    home-directory environment variable if it has one (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`). Do not scan
    the filesystem hunting for logs.
    - `detect()` returns directories in `watchPaths`; the daemon walks them recursively (max depth 5)
-     for `*.jsonl` modified in the last 7 days. A database-backed adapter returns `[]` here.
+     for `*.jsonl` modified in the last `tracking.max_age_days` days (default 7). A database-backed
+     adapter returns `[]` here.
    - `health()` runs on every `status` and `doctor` — keep it cheap.
 3. **Register it** in `buildAdapters()` in [`src/daemon.ts`](./src/daemon.ts), and add the id to the
    `tracking.agents` default in [`src/config.ts`](./src/config.ts) only if it should be on by default.
-4. **Emit existing event types.** Map onto the 18 in [`docs/EVENT_SCHEMA.md`](./docs/EVENT_SCHEMA.md);
+4. **Emit existing event types.** Map onto the 19 in [`docs/EVENT_SCHEMA.md`](./docs/EVENT_SCHEMA.md);
    do not invent one. Token fields must map onto `TokenUsage` (`input_tokens`, `cached_input_tokens`,
    `cache_creation_input_tokens`, `output_tokens`, `reasoning_output_tokens`), and reasoning tokens
    are a **subset** of output tokens — never add them on top. If the agent reports **cumulative**
@@ -225,16 +226,20 @@ one active account per provider), set `account` on the `NormalizedEvent` and it 
    | `payload.repo.project_path` | dropped unless `file_paths: absolute` |
    | `payload.cwd` | dropped unless `file_paths: absolute` — it *is* the project root |
    | `payload.account` | `label` and `org` stripped in `metadata`; `key` and `provider` always sent |
-   | `payload.command` | secret redaction, and truncation under `shell_arguments: never` |
+   | `payload.command` | secret redaction; cut to the binary name in `metadata` and under `shell_arguments: never` |
    | `payload.prompt_text` | deleted in every mode except `full` + `prompts: full` |
-   | `payload.derived_title` | deleted in `metadata`, and in `analytics` under `prompts: never` (not in `full` — see ROADMAP); redacted otherwise |
-   | `payload.message` | deleted in `metadata`, redacted otherwise |
+   | `payload.derived_title` | deleted in `metadata`, and in every mode under `prompts: never`; redacted, then cut to 120 characters, otherwise |
+   | `payload.message` | deleted in `metadata`; redacted, then cut to 1000 characters, otherwise |
+   | `payload.description` | deleted in `metadata`, redacted otherwise |
+   | labels: `tool_name`, `skill`, `subagent_type`, `agent_type`, `workflow_name`, `model`, `branch`, `project_name`, `abort_reason`, … (`LABEL_KEYS`) | never deleted; redacted in every mode |
    | `payload.content`, `diff`, `old_string`, `new_string` | deleted unless `code_content: full` |
 
-   A new free-text field under a **new** key bypasses redaction entirely. If you need one, add it to
-   `TEXT_KEYS` in the pipeline in the same PR, with a test.
+   A new free-text field or label under a **new** key bypasses redaction entirely. If you need one,
+   add it to `TEXT_KEYS` (or `LABEL_KEYS`, for something that must survive `metadata`) in the
+   pipeline in the same PR, with a test. If it needs a length cap, add it to `FIELD_MAX_LENGTH` —
+   never cut it in the adapter, because a cut before redaction can split a secret.
 6. **Derive line counts in the adapter.** The pipeline deletes `old_string` / `new_string` / `content`
-   before upload, so no later stage can recover them. Both existing adapters compute
+   before upload, so no later stage can recover them. The existing adapters compute
    `lines_added` / `lines_removed` at normalize time — see `countEditLines()` in `claude.ts` and
    `parseApplyPatch()` in `codex.ts`.
 7. **Add a fixture and a test.** Fixture at `test/fixtures/<agent>-session.jsonl`, test alongside the
