@@ -23,6 +23,7 @@
  *    a log line, and the old version keeps collecting.
  */
 import { execFile } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { delimiter, dirname } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -136,19 +137,25 @@ export function installArgs(version: string): string[] {
   ];
 }
 
+/**
+ * How npm is spawned: the PATH above, and a neutral cwd. npm reads the
+ * `.npmrc` of the project it is run from, and the daemon's cwd is wherever
+ * `agentstrack start` was typed — a project's registry, token or script
+ * settings must not reach an unattended global install.
+ */
+export function npmRunOptions(timeoutMs: number): { timeout: number; env: NodeJS.ProcessEnv; cwd: string } {
+  return { timeout: timeoutMs, env: npmEnv(process.execPath, process.env), cwd: tmpdir() };
+}
+
 /** Install an exact version globally. Returns the version actually on disk after. */
 export async function installVersion(version: string, timeoutMs = 180_000): Promise<string | null> {
   // Exact version, never a range or a dist-tag: whatever was decided from the
   // registry read is what gets installed, so the log line and the artifact
   // cannot disagree.
   if (!isReleaseVersion(version)) throw new Error('refusing to install a version that is not x.y.z');
-  const env = npmEnv(process.execPath, process.env);
-  await run('npm', installArgs(version), { timeout: timeoutMs, env });
+  await run('npm', installArgs(version), npmRunOptions(timeoutMs));
   try {
-    const { stdout } = await run('npm', ['ls', '--global', '--depth', '0', '--json'], {
-      timeout: 30_000,
-      env,
-    });
+    const { stdout } = await run('npm', ['ls', '--global', '--depth', '0', '--json'], npmRunOptions(30_000));
     const tree = JSON.parse(stdout) as { dependencies?: Record<string, { version?: string }> };
     return tree.dependencies?.[PACKAGE_NAME]?.version ?? null;
   } catch {

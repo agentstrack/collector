@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { compareVersions, installArgs, installVersion, isReleaseVersion, npmEnv, selfUpdatable } from './update.js';
+import { tmpdir } from 'node:os';
+import { compareVersions, installArgs, installVersion, isReleaseVersion, npmEnv, npmRunOptions, selfUpdatable } from './update.js';
 
 describe('isReleaseVersion — the registry answer becomes an npm argument', () => {
   it('accepts plain x.y.z only', () => {
@@ -24,6 +25,14 @@ describe('isReleaseVersion — the registry answer becomes an npm argument', () 
       ]),
     );
     expect(installArgs('0.7.0')).not.toContain('--ignore-scripts');
+  });
+
+  it("runs npm from the temp dir, so the user's project .npmrc is never read", () => {
+    const options = npmRunOptions(1234);
+    expect(options.cwd).toBe(tmpdir());
+    expect(options.cwd).not.toBe(process.cwd());
+    expect(options.timeout).toBe(1234);
+    expect(options.env['PATH']?.startsWith(npmEnv(process.execPath, {}).PATH!)).toBe(true);
   });
 });
 
