@@ -63,7 +63,7 @@ export const BUILTIN_RULES: RedactionRule[] = [
   // worse than no rule: the real one gets filtered with the rest.
   {
     name: 'inline_password_flag',
-    pattern: /((?:^|[|;&]\s*|\s)(?:mysql|mysqladmin|mysqldump|mysqlshow|mariadb|mariadb-dump|mongo|mongosh|sshpass|smbclient)\b[^\n|;&]*?(?<![\w-])-p)(?!\s)("[^"]*"|'[^']*'|\S+)/g,
+    pattern: /((?:^|[|;&]\s*|\s)(?:mysql|mysqladmin|mysqldump|mysqlshow|mariadb|mariadb-dump|mongo|mongosh|sshpass|smbclient)\b[^\n|;&]{0,300}?(?<![\w-])-p)(?!\s)("[^"]*"|'[^']*'|\S+)/g,
     replacement: '$1[REDACTED]',
   },
   // `--token VALUE` / `--api-key=VALUE` and friends: like `--password`, the
@@ -76,7 +76,7 @@ export const BUILTIN_RULES: RedactionRule[] = [
   // `curl -u user:pass` — the credential is the whole `user:pass` word.
   {
     name: 'curl_user',
-    pattern: /(\bcurl\b[^\n|;&]*?\s(?:-u|--user)[= ]?\s*)("[^"]*"|'[^']*'|[^\s:'"]+:\S+)/g,
+    pattern: /(\bcurl\b[^\n|;&]{0,300}?\s(?:-u|--user)[= ]?\s*)("[^"]*"|'[^']*'|[^\s:'"]+:\S+)/g,
     replacement: '$1[REDACTED]',
   },
   // `key=value`, `key: value`, `?access_token=…&` and JSON `"apiKey": "…"`,

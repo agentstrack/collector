@@ -338,6 +338,8 @@ describe('secret patterns — escaped JSON, more keys, flags and headers', () =>
       '--x-'.repeat(25_000) + 'secret',
       'a.'.repeat(50_000) + '=',
       'auth="' + '\\'.repeat(100_000),
+      'curl -u '.repeat(12_500),
+      ' mysql x'.repeat(12_500),
     ];
     for (const input of inputs) {
       const started = performance.now();
