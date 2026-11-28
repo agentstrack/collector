@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { ApiClient, ApiError, BatchResult, backoffMs, errorCode, parseServerConfig, retryAfterMs } from './client.js';
 
 describe('parseServerConfig', () => {
+  it('drops only the malformed redaction rules, keeping the config and the valid ones', () => {
+    const config = parseServerConfig({
+      privacy_mode: 'analytics',
+      redaction_rules: [{ pattern: 'acme-\\d+', replacement: '[org]' }, { pattern: 1 }, null, 'x', { replacement: 'y' }],
+    });
+    expect(config?.privacy_mode).toBe('analytics');
+    expect(config?.redaction_rules).toEqual([{ pattern: 'acme-\\d+', replacement: '[org]' }]);
+    expect(parseServerConfig({ privacy_mode: 'analytics' })?.redaction_rules).toEqual([]);
+  });
+
   it('keeps unknown fields, defaults missing rules to [], leaves event_types undefined', () => {
     const config = parseServerConfig({ privacy_mode: 'analytics', retention_days: 30, future_field: 1 });
     expect(config).toMatchObject({ privacy_mode: 'analytics', redaction_rules: [], future_field: 1 });
@@ -13,8 +23,8 @@ describe('parseServerConfig', () => {
     expect(parseServerConfig({})?.privacy_mode).toBe('metadata');
   });
 
-  it('rejects malformed rules and non-objects', () => {
-    expect(parseServerConfig({ privacy_mode: 'full', redaction_rules: [{ pattern: 1 }] })).toBeNull();
+  it('rejects a non-array rule list and non-objects', () => {
+    expect(parseServerConfig({ privacy_mode: 'full', redaction_rules: 'acme' })).toBeNull();
     expect(parseServerConfig('<html>Bad Gateway</html>')).toBeNull();
     expect(parseServerConfig(null)).toBeNull();
   });

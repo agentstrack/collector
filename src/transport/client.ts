@@ -42,6 +42,33 @@ export const BatchResult = z.object({
 });
 export type BatchResult = z.infer<typeof BatchResult>;
 
+const RedactionRuleShape = z.object({ pattern: z.string(), replacement: z.string() });
+
+/**
+ * Org redaction rules, validated one by one: a single malformed element is
+ * dropped on its own rather than failing the whole config, which would also
+ * throw away the org's privacy ceiling and every valid rule beside it.
+ */
+const RedactionRules = z
+  .array(z.unknown())
+  .default([])
+  .transform((rules) =>
+    rules.flatMap((rule) => {
+      const parsed = RedactionRuleShape.safeParse(rule);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  );
+
+/**
+ * The privacy half of the server config — also what the daemon persists in
+ * spool meta, and re-validated with this same schema when read back.
+ */
+export const OrgPolicy = z.object({
+  privacy_mode: z.enum(PRIVACY_MODES).catch('metadata'),
+  redaction_rules: RedactionRules,
+});
+export type OrgPolicy = z.infer<typeof OrgPolicy>;
+
 /**
  * `GET /v1/collector/config` is a trust boundary too, and the org ceiling and
  * redaction rules inside it are privacy controls. Unknown fields are kept
@@ -49,10 +76,10 @@ export type BatchResult = z.infer<typeof BatchResult>;
  * the strictest one, never a looser default.
  */
 export const ServerConfig = z.looseObject({
-  privacy_mode: z.enum(PRIVACY_MODES).catch('metadata'),
+  privacy_mode: OrgPolicy.shape.privacy_mode,
   idle_timeout_seconds: z.number().optional(),
   retention_days: z.number().optional(),
-  redaction_rules: z.array(z.object({ pattern: z.string(), replacement: z.string() })).default([]),
+  redaction_rules: RedactionRules,
   // 0 = no server cap; the daemon only applies a positive integer.
   max_batch_events: z.number().catch(0),
   batch_interval_seconds: z.number().optional(),

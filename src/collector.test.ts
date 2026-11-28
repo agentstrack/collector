@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Collector, ORG_POLICY_META, UPLOAD_PAUSE_META, errorMessage, toPrivacyMode } from './daemon.js';
-import { Config } from './config.js';
+import { Config, loadConfig, saveConfig } from './config.js';
 import { Spool } from './queue/spool.js';
 import { tailFile, type TailResult } from './queue/tailer.js';
 import { ApiError, type BatchResult, type ServerConfig } from './transport/client.js';
@@ -14,6 +14,12 @@ import type { AgentAdapter, NormalizedEvent } from './adapters/types.js';
 // The tailer is replaced so a scan can be driven without agent homes on disk.
 vi.mock('./queue/tailer.js', () => ({ tailFile: vi.fn() }));
 const tail = vi.mocked(tailFile);
+// ensureRegistered writes the real config file; capture it instead.
+vi.mock('./config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./config.js')>()),
+  loadConfig: vi.fn(),
+  saveConfig: vi.fn(),
+}));
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -138,6 +144,76 @@ describe('org policy', () => {
     const { collector } = setup({ spoolPath, config: { privacy: { mode: 'full' } }, getConfig: offline });
     // @ts-expect-error private
     expect(collector.config.privacy.mode).toBe('metadata');
+  });
+
+  describe('before the first successful fetch', () => {
+    const adapter: AgentAdapter = {
+      id: 'codex',
+      detect: async () => ({ installed: true, watchPaths: [] }),
+      health: async () => ({ healthy: true, filesTracked: 1 }),
+      normalize: () => [],
+      poll: async () => [prompt('/w/app')],
+    };
+
+    it('reads and spools nothing offline with no persisted policy, then clamps once the server answers', async () => {
+      let reachable = false;
+      const { spool, collector } = setup({
+        config: { privacy: { mode: 'full' } },
+        getConfig: async () => (reachable ? serverConfig({ privacy_mode: 'metadata' }) : offline()),
+      });
+      // @ts-expect-error private
+      collector.adapters = [adapter];
+      await collector.scanOnce();
+      expect(spool.depth()).toBe(0);
+      expect(await collector.flush()).toBe(false);
+
+      reachable = true;
+      await collector.scanOnce();
+      const [event] = sent(spool);
+      expect(event!.payload['prompt_text']).toBeUndefined();
+      expect(event!.payload['prompt_chars']).toBe(12);
+    });
+
+    it('treats unreadable persisted meta as no policy, without throwing in the constructor', async () => {
+      for (const raw of ['{not json', JSON.stringify({ privacy_mode: 'full', redaction_rules: 'acme' })]) {
+        const spoolPath = join(tempDir(), 'spool.db');
+        const seed = new Spool(spoolPath);
+        seed.setMeta(ORG_POLICY_META, raw);
+        seed.close();
+        const { spool, collector } = setup({ spoolPath, config: { privacy: { mode: 'full' } }, getConfig: offline });
+        // @ts-expect-error private
+        collector.adapters = [adapter];
+        await collector.scanOnce();
+        expect(spool.depth(), raw).toBe(0);
+      }
+    });
+
+    it('keeps the valid rules of a persisted policy with one malformed element', () => {
+      const spoolPath = join(tempDir(), 'spool.db');
+      const seed = new Spool(spoolPath);
+      seed.setMeta(
+        ORG_POLICY_META,
+        JSON.stringify({ privacy_mode: 'analytics', redaction_rules: [{ pattern: 'acme-\\d+', replacement: '[org]' }, { pattern: 7 }] }),
+      );
+      seed.close();
+      const { collector } = setup({ spoolPath, config: { privacy: { mode: 'full' } }, getConfig: offline });
+      // @ts-expect-error private
+      expect(collector.orgRules).toHaveLength(1);
+      // @ts-expect-error private
+      expect(collector.config.privacy.mode).toBe('analytics');
+    });
+  });
+
+  it('saves only the registration over the on-disk config, never a start --agent override', async () => {
+    const onDisk = Config.parse({ api_key: 'at_test', tracking: { agents: ['claude_code', 'codex'] }, privacy: { mode: 'full' } });
+    vi.mocked(loadConfig).mockReturnValue(onDisk);
+    const { client, collector } = setup({
+      config: { collector_id: undefined, tracking: { git_metadata: false, agents: ['codex'] }, privacy: { mode: 'analytics' } },
+    });
+    client.registerCollector.mockResolvedValue({ collector_id: COLLECTOR, privacy_mode: 'full' });
+    // @ts-expect-error private
+    await collector.ensureRegistered();
+    expect(vi.mocked(saveConfig)).toHaveBeenCalledWith({ ...onDisk, collector_id: COLLECTOR });
   });
 
   it('fetches the server config before a one-shot scan (sync --full)', async () => {
@@ -304,6 +380,7 @@ describe('upload', () => {
       },
     });
     spool.enqueue(events);
+    await collector.scanOnce(); // fetches the org policy uploads wait for
     for (let i = 0; i < 10; i++) await collector.flush();
     expect(spool.depth()).toBe(0);
     expect(collector.uploadState().paused).toBeNull();
@@ -322,6 +399,7 @@ describe('upload', () => {
       },
     });
     spool.enqueue(events);
+    await collector.scanOnce(); // fetches the org policy uploads wait for
     for (let i = 0; i < 6; i++) await collector.flush();
     expect(accepted.sort()).toEqual(events.slice(1).map((e) => e.event_id).sort());
     expect(spool.peek(10).map((p) => p.eventId)).toEqual([bad]);
@@ -331,6 +409,7 @@ describe('upload', () => {
     const { spool, collector } = setup();
     spool.setMeta(UPLOAD_PAUSE_META, 'auth: revoked');
     spool.enqueue([heartbeat()]);
+    await collector.scanOnce();
     await collector.flush();
     expect(spool.getMeta(UPLOAD_PAUSE_META)).toBeNull();
   });

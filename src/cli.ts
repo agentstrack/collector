@@ -494,6 +494,14 @@ program
       // a throwaway copy of the spool — its queue and read checkpoints — so it
       // finds what the daemon would, and no offset or event is persisted.
       const dir = mkdtempSync(join(tmpdir(), 'agentstrack-dry-run-'));
+      // A Ctrl-C mid-scan skips the finally below; the snapshot holds queued
+      // telemetry and must not be left in the temp dir.
+      const onSignal = (signal: NodeJS.Signals) => {
+        rmSync(dir, { recursive: true, force: true });
+        process.exit(signal === 'SIGINT' ? 130 : 143);
+      };
+      process.once('SIGINT', onSignal);
+      process.once('SIGTERM', onSignal);
       let pending: ReturnType<Spool['peek']>;
       try {
         const copy = join(dir, 'spool.db');
@@ -506,11 +514,13 @@ program
           }
         }
         const spool = new Spool(copy);
-        const collector = new Collector(config, { spool });
+        const collector = new Collector(config, { spool, dryRun: true });
         await collector.scanOnce();
         pending = spool.peek(Number.MAX_SAFE_INTEGER);
         collector.stop();
       } finally {
+        process.off('SIGINT', onSignal);
+        process.off('SIGTERM', onSignal);
         rmSync(dir, { recursive: true, force: true });
       }
       if (pending.length === 0) {
@@ -552,13 +562,19 @@ program
     }
 
     const collector = new Collector(config);
-    // A plain sync uploads what is already queued. A full one has to scan
-    // first — with the checkpoints gone there is nothing in the queue yet, and
-    // exiting on an empty queue would make --full a no-op that looked like
-    // success.
-    if (options.full) {
+    // Scan first, as one daemon pass would, so `sync` sends what
+    // `sync --dry-run` showed — on a fresh install the queue is empty until
+    // something has read the transcripts. A --full sync has to scan regardless:
+    // with the checkpoints gone there is nothing queued yet.
+    // A plain sync does not scan while a collector is running. Each process
+    // keeps its own checkpoint cache and per-file adapter state (Codex billing
+    // mode, session ids), so a second reader resuming mid-file can emit
+    // different events, and the daemon would re-read what this one sent.
+    if (options.full || !isRunning()) {
       console.log('Scanning transcripts…');
       await collector.scanOnce();
+    } else {
+      console.log(pc.dim('The running collector reads new transcript lines itself; uploading what is already queued.'));
     }
     const before = collector.queueDepth();
     if (before === 0) {

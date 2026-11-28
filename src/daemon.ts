@@ -13,7 +13,7 @@ import { tailFile } from './queue/tailer.js';
 import { deterministicEventId } from './queue/event-id.js';
 import { readOpenIslandRateLimits } from './adapters/open-island.js';
 export { deterministicEventId };
-import { ApiClient, ApiError, backoffMs, VERSION, type BatchResult, type ServerConfig } from './transport/client.js';
+import { ApiClient, ApiError, OrgPolicy, backoffMs, VERSION, type BatchResult, type ServerConfig } from './transport/client.js';
 import { ClaudeCodeAdapter } from './adapters/claude.js';
 import { CodexAdapter } from './adapters/codex.js';
 import { OpenCodeAdapter } from './adapters/opencode.js';
@@ -208,8 +208,6 @@ export const ORG_POLICY_META = 'org_policy';
 const CONFIG_TTL_MS = 10 * 60_000;
 const CONFIG_RETRY_MS = 60_000;
 
-type OrgPolicy = Pick<ServerConfig, 'privacy_mode' | 'redaction_rules'>;
-
 /** The subset of ApiClient the daemon uses — a test hands in a fake. */
 type Transport = Pick<ApiClient, 'registerCollector' | 'getConfig' | 'sendBatch' | 'health'>;
 
@@ -232,6 +230,14 @@ export class Collector {
   private readonly localMode: PrivacyMode;
   private configAttemptAt = 0;
   private warnedConfig = false;
+  /**
+   * Whether an org policy — fetched, or persisted from an earlier fetch — is
+   * in force. Privacy is applied at enqueue, so until one is, a registered
+   * device neither tails nor uploads: an event spooled under the looser local
+   * mode would be sent at that mode after the ceiling arrived.
+   */
+  private policyKnown = false;
+  private warnedNoPolicy = false;
   /** git root -> last branch seen, for git.branch_changed. Per process: the first read is never a change. */
   private readonly lastBranch = new Map<string, string>();
   /** Event types enqueued during the current scan, for `--verbose`. */
@@ -264,11 +270,14 @@ export class Collector {
   /** Warn-once flags: these states are normal and must not spam the log. */
   private warnedNotUpdatable = false;
   private warnedAttempted = false;
+  /** `sync --dry-run`: scans a throwaway spool, so its scan tallies must not reach the real log. */
+  private readonly dryRun: boolean;
 
   constructor(
     private config: Config,
-    deps: { spool?: Spool; client?: Transport } = {},
+    deps: { spool?: Spool; client?: Transport; dryRun?: boolean } = {},
   ) {
+    this.dryRun = deps.dryRun ?? false;
     if (!config.api_key) throw new Error('Not logged in. Run: agentstrack login <api-key>');
     this.spool = deps.spool ?? new Spool(SPOOL_PATH);
     this.client = deps.client ?? new ApiClient({ apiUrl: config.api_url, apiKey: config.api_key });
@@ -279,8 +288,8 @@ export class Collector {
     this.batchSize = config.upload.batch_size;
     this.maxBatchSize = config.upload.batch_size;
     // Until the server answers, the last org policy it gave is still the
-    // ceiling. Never fetched and nothing persisted: the local mode, which
-    // `login` already clamped to the org's mode at registration.
+    // ceiling. Never fetched and nothing persisted (or persisted unreadably):
+    // no policy, so scan() and flush() hold until the first fetch succeeds.
     this.localMode = config.privacy.mode;
     const persisted = this.persistedPolicy();
     if (persisted) this.applyOrgPolicy(persisted);
@@ -468,24 +477,37 @@ export class Collector {
     });
 
     this.config = { ...this.config, collector_id: result.collector_id };
-    // The local mode, not the org-clamped one: the clamp is re-derived per run.
-    saveConfig({ ...this.config, privacy: { ...this.config.privacy, mode: this.localMode } });
+    // Only the registration over what is on disk: the in-memory config carries
+    // the org-clamped mode and any `start --agent` override, neither of which
+    // the user saved.
+    saveConfig({ ...loadConfig(), collector_id: result.collector_id });
     log(`Registered collector ${result.collector_id}`);
   }
 
-  /** The org policy from the last successful fetch, or null if none was ever stored. Corrupt means strictest. */
+  /**
+   * The org policy from the last successful fetch, validated with the same
+   * schema as the fetch. Null when none was stored or it is unreadable — an
+   * unknown policy, which holds collection until the server answers.
+   */
   private persistedPolicy(): OrgPolicy | null {
     const raw = this.spool.getMeta(ORG_POLICY_META);
     if (raw === null) return null;
     try {
-      const parsed = JSON.parse(raw) as Partial<OrgPolicy>;
-      return {
-        privacy_mode: toPrivacyMode(parsed.privacy_mode),
-        redaction_rules: Array.isArray(parsed.redaction_rules) ? parsed.redaction_rules : [],
-      };
+      const parsed = OrgPolicy.safeParse(JSON.parse(raw));
+      return parsed.success ? parsed.data : null;
     } catch {
-      return { privacy_mode: 'metadata', redaction_rules: [] };
+      return null;
     }
+  }
+
+  /** False, logged once, while a registered device has no org policy in force. */
+  private holdUntilPolicy(): boolean {
+    if (this.policyKnown || !this.config.collector_id) return false;
+    if (!this.warnedNoPolicy) {
+      this.warnedNoPolicy = true;
+      log('No org policy yet (server config never fetched) — not reading or uploading until it is');
+    }
+    return true;
   }
 
   private applyOrgPolicy(policy: OrgPolicy): void {
@@ -498,6 +520,7 @@ export class Collector {
       log(`Local privacy mode '${this.localMode}' exceeds org policy '${effective}' — using org policy`);
     }
     this.config = { ...this.config, privacy: { ...this.config.privacy, mode: effective } };
+    this.policyKnown = true;
   }
 
   /** Re-fetches the server config on a TTL, sooner while it is still unknown. */
@@ -531,8 +554,8 @@ export class Collector {
       // Once per outage: an offline laptop retries every minute.
       if (!this.warnedConfig) {
         this.warnedConfig = true;
-        const basis = this.persistedPolicy() ? 'last known org policy' : 'local privacy mode';
-        log(`Could not fetch server config, using the ${basis}: ${errorMessage(error)}`);
+        const basis = this.policyKnown ? 'using the last known org policy' : 'holding collection until it can be';
+        log(`Could not fetch server config, ${basis}: ${errorMessage(error)}`);
       }
     }
   }
@@ -553,6 +576,9 @@ export class Collector {
     const collectorId = this.config.collector_id;
     if (!collectorId) return;
     await this.maybeRefreshServerConfig();
+    // Nothing read means no checkpoint moves: the same lines are read, and
+    // clamped, once the policy is known.
+    if (this.holdUntilPolicy()) return;
 
     this.repoCache.clear();
     this.scanCounts.clear();
@@ -614,7 +640,9 @@ export class Collector {
       // the same cycle, under the same gating and the same privacy pipeline.
       if (adapter.poll) {
         try {
-          queued += await this.pollAdapter(adapter.poll.bind(adapter), collectorId, account);
+          const polled = await this.pollAdapter(adapter.poll.bind(adapter), collectorId, account);
+          queued += polled.queued;
+          dropped += polled.dropped;
         } catch (error) {
           log(`poll error in ${adapter.id}: ${errorMessage(error)}`);
         }
@@ -638,9 +666,11 @@ export class Collector {
       queued += this.endIdleSessions(this.config.tracking.idle_timeout_seconds * 1000, 'timeout');
     }
 
-    if (queued > 0) log(`Queued ${queued} events across ${files} files`);
-    if (skipped > 0) log(`Skipped ${skipped} oversized transcript lines`);
-    if (dropped > 0) log(`Dropped ${dropped} events with no known project while excluded_projects is set`);
+    if (!this.dryRun) {
+      if (queued > 0) log(`Queued ${queued} events across ${files} files`);
+      if (skipped > 0) log(`Skipped ${skipped} oversized transcript lines`);
+      if (dropped > 0) log(`Dropped ${dropped} events with no known project while excluded_projects is set`);
+    }
     if (this.scanCounts.size > 0) {
       verbose(`Scan queued: ${[...this.scanCounts].map(([type, n]) => `${type}=${n}`).join(' ')}`);
     }
@@ -666,19 +696,22 @@ export class Collector {
     poll: NonNullable<AgentAdapter['poll']>,
     collectorId: string,
     account: AccountIdentity | undefined,
-  ): Promise<number> {
+  ): Promise<{ queued: number; dropped: number }> {
     const pending = new Map<string, string>();
     const polled = await poll({
       collectorId,
       getMeta: (key) => pending.get(key) ?? this.spool.getMeta(key),
       setMeta: (key, value) => void pending.set(key, value),
     });
-    this.commitWatcher?.observe(polled);
-    return this.spool.transaction(() => {
-      const queued = this.enqueue(polled, collectorId, account);
+    // The same fail-closed exclusion as the tail path, before the commit watcher.
+    const kept = this.dropUnattributable(polled);
+    this.commitWatcher?.observe(kept);
+    const queued = this.spool.transaction(() => {
+      const n = this.enqueue(kept, collectorId, account);
       pending.forEach((value, key) => this.spool.setMeta(key, value));
-      return queued;
+      return n;
     });
+    return { queued, dropped: polled.length - kept.length };
   }
 
   /**
@@ -887,6 +920,7 @@ export class Collector {
    * is more to send right now.
    */
   async flush(maxWaves = Number.POSITIVE_INFINITY): Promise<boolean> {
+    if (this.holdUntilPolicy()) return false;
     const concurrency = Math.max(1, this.config.upload.concurrency);
     for (let n = 0; n < maxWaves; n++) {
       // One peek for the whole wave. Peeking per batch would hand the same
@@ -906,6 +940,8 @@ export class Collector {
       verbose(`Upload wave: ${batches.length} batch(es) of ${batches.map((b) => b.length).join('/')} events`);
       let allOk = true;
       let split = null as 'too_large' | 'rejected' | null;
+      /** The largest batch that asked to be split: halving starts from it, not from the configured size. */
+      let splitFrom = 0;
       // `null as` keeps the declared union: a plain `= null` narrows to never below.
       let retry = null as { error: unknown; retryAfterMs: number } | null;
       let paused = null as { reason: PauseReason; detail: string } | null;
@@ -928,7 +964,10 @@ export class Collector {
           continue;
         }
         allOk = false;
-        if (outcome.kind === 'split') split ??= outcome.why;
+        if (outcome.kind === 'split') {
+          split ??= outcome.why;
+          splitFrom = Math.max(splitFrom, batches[i]!.length);
+        }
         else if (outcome.kind === 'retry') {
           retry = {
             error: retry?.error ?? outcome.error,
@@ -947,7 +986,7 @@ export class Collector {
       if (split) {
         // Too big for the server (the events are fine), or one bad event
         // failing its whole batch: halve until the bad one is alone and struck.
-        this.batchSize = Math.max(1, Math.floor(this.batchSize / 2));
+        this.batchSize = Math.max(1, Math.floor(splitFrom / 2));
         log(
           `Server rejected the batch ${split === 'too_large' ? 'as too large' : 'as invalid'} — reducing batch size to ${this.batchSize}`,
         );

@@ -4,6 +4,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 
 /**
  * Whole CLI invocations, in-process, against a throwaway home. Nothing here
@@ -76,10 +77,22 @@ describe('cli', () => {
     expect(out).toContain('Unknown agent: nope');
   });
 
-  /** A server that answers GET /v1/collector/config and nothing else. */
-  async function configServer(): Promise<number> {
-    server = createServer((_req, res) => {
+  /** A server that answers GET /v1/collector/config and accepts POST /v1/events/batch. */
+  async function configServer(received: unknown[] = []): Promise<number> {
+    server = createServer((req, res) => {
       res.setHeader('content-type', 'application/json');
+      if (req.method === 'POST' && req.url === '/v1/events/batch') {
+        const chunks: Buffer[] = [];
+        req.on('data', (c: Buffer) => chunks.push(c));
+        req.on('end', () => {
+          const body = Buffer.concat(chunks);
+          const raw = req.headers['content-encoding'] === 'gzip' ? gunzipSync(body) : body;
+          const { events } = JSON.parse(raw.toString('utf8')) as { events: unknown[] };
+          received.push(...events);
+          res.end(JSON.stringify({ accepted: events.length, duplicates: 0, rejected: [] }));
+        });
+        return;
+      }
       res.end(JSON.stringify({
         privacy_mode: 'analytics', idle_timeout_seconds: 120, retention_days: 30, redaction_rules: [],
         max_batch_events: 100, batch_interval_seconds: 30,
@@ -105,6 +118,48 @@ describe('cli', () => {
     expect(out).toContain('session.started');
     // No spool, so no checkpoint or queued event, was written for real.
     expect(existsSync(join(dir, '.agentstrack', 'spool.db'))).toBe(false);
+    // Nor did the throwaway scan claim, in the real log, to have queued anything.
+    const logPath = join(dir, '.agentstrack', 'collector.log');
+    expect(existsSync(logPath) ? readFileSync(logPath, 'utf8') : '').not.toMatch(/Queued \d+ events/);
+  });
+
+  const codexHome = (dir: string) => {
+    const day = join(dir, '.codex', 'sessions', '2026', '08', '26');
+    mkdirSync(day, { recursive: true });
+    writeFileSync(
+      join(day, 'rollout-2026-08-26T09-00-00-019d94f1-c8eb-7582-9345-71eace2149f6.jsonl'),
+      readFileSync(join(import.meta.dirname, '../test/fixtures/codex-session.jsonl')),
+    );
+  };
+
+  it('plain sync scans first on a fresh install, so it uploads what --dry-run showed', async () => {
+    const received: unknown[] = [];
+    const port = await configServer(received);
+    const dir = home(`${LOGGED_IN}api_url: http://127.0.0.1:${port}\ntracking:\n  agents: [codex]\n  git_metadata: false\n`);
+    codexHome(dir);
+    const dry = await cli(dir, 'sync', '--dry-run');
+    const shown = Number(/(\d+) event\(s\) would be sent/.exec(dry.out)?.[1]);
+    expect(shown).toBeGreaterThan(0);
+
+    const { out, code } = await cli(dir, 'sync');
+    expect(code).toBe(0);
+    expect(out).not.toContain('Queue is already empty');
+    expect(received).toHaveLength(shown);
+  });
+
+  it('plain sync leaves scanning to a running collector', async () => {
+    const received: unknown[] = [];
+    const port = await configServer(received);
+    const dir = home(`${LOGGED_IN}api_url: http://127.0.0.1:${port}\ntracking:\n  agents: [codex]\n  git_metadata: false\n`);
+    codexHome(dir);
+    // This test process stands in for a live daemon holding the pid file.
+    writeFileSync(join(dir, '.agentstrack', 'collector.pid'), String(process.pid));
+
+    const { out, code } = await cli(dir, 'sync');
+    expect(code).toBe(0);
+    expect(out).toContain('running collector reads new transcript lines itself');
+    expect(out).toContain('Queue is already empty');
+    expect(received).toHaveLength(0);
   });
 
   it('doctor passes with one agent installed and another simply absent, without creating a spool', async () => {
