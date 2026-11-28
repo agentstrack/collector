@@ -314,6 +314,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     }
 
     const content = message['content'];
+    // file.changed events this adapter started emitting in 0.7.0 go after every
+    // other event on the line. Event ids hash the line plus the event's position
+    // in it, so slotting them in mid-line would shift the ids of events an older
+    // collector already sent, and a re-read would then drop or double them.
+    const appended: NormalizedEvent[] = [];
     if (Array.isArray(content)) {
       for (const block of content) {
         if (!block || typeof block !== 'object') continue;
@@ -334,7 +339,8 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         // NotebookEdit names its file notebook_path; older builds used file_path.
         const filePath = str(input['file_path']) ?? (toolName === 'NotebookEdit' ? str(input['notebook_path']) : undefined);
         if (filePath && EDIT_TOOLS.has(toolName)) {
-          events.push(
+          const newIn070 = toolName === 'MultiEdit' || (toolName === 'NotebookEdit' && !str(input['file_path']));
+          (newIn070 ? appended : events).push(
             wrap('file.changed', {
               path: filePath,
               change_kind: toolName === 'Write' ? 'create' : 'edit',
@@ -347,7 +353,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         }
       }
     }
-    return events;
+    return [...events, ...appended];
   }
 }
 

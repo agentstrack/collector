@@ -192,6 +192,16 @@ describe('ClaudeCodeAdapter MultiEdit and NotebookEdit', () => {
     expect(multi[0]!.event.payload).toMatchObject({ change_kind: 'edit', lines_added: 3, lines_removed: 3 });
   });
 
+  it('puts the new file.changed events last on their line, so older event ids keep their positions', () => {
+    const adapter = new ClaudeCodeAdapter();
+    for (const line of fixture('claude-multiedit.jsonl')) {
+      const types = adapter.normalize(line, { collectorId: 'c', sourceFile: 'f' }).map((e) => e.event.event_type);
+      const first = types.indexOf('file.changed');
+      if (first === -1) continue;
+      expect(types.slice(first).every((t) => t === 'file.changed'), types.join(',')).toBe(true);
+    }
+  });
+
   it('reads notebook_path and counts the inserted cell, never carrying its source', () => {
     const nb = at('/Users/dev/Web/api/analysis.ipynb');
     expect(nb).toHaveLength(1);
