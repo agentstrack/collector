@@ -23,9 +23,51 @@ function xmlEscape(value: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/** Quotes an argument for a systemd ExecStart line (double quotes, backslash-escaped). */
-function systemdQuote(value: string): string {
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+/**
+ * Makes a value literal in a unit file: `%` is a specifier in every setting,
+ * and a newline would end the line and start a directive of the path's
+ * choosing — refused, since there is no escape for it that every setting honours.
+ */
+function systemdLiteral(value: string): string {
+  if (/[\r\n]/.test(value)) throw new Error('refusing to write a systemd unit with a newline in a path');
+  return value.replace(/%/g, '%%');
+}
+
+/**
+ * Quotes a value for ExecStart= or Environment= (double quotes,
+ * backslash-escaped). `$` is escaped as `$$` only where systemd expands
+ * variables, which is ExecStart=; Environment= would keep both dollars.
+ */
+function systemdQuote(value: string, execLine = false): string {
+  const escaped = systemdLiteral(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${execLine ? escaped.replace(/\$/g, '$$$$') : escaped}"`;
+}
+
+/**
+ * The user unit. WorkingDirectory= is not unquoted by systemd — it takes the
+ * rest of the line as the path, spaces included — so it is escaped, not quoted.
+ */
+export function systemdUnit(nodePath: string, cliPath: string, configDir: string, home?: string): string {
+  const environmentLine = home ? `Environment=AGENTSTRACK_HOME=${systemdQuote(home)}\n` : '';
+  return `[Unit]
+Description=AgentsTrack collector
+After=network-online.target
+# Stop respawning after 5 failures in 5 minutes so a persistently broken unit
+# (bad path, revoked key) idles instead of looping.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=${systemdQuote(nodePath, true)} ${systemdQuote(cliPath, true)} start --foreground
+# Restart on failure only; a clean exit (e.g. after logout) must stay stopped.
+Restart=on-failure
+RestartSec=10
+${environmentLine}WorkingDirectory=${systemdLiteral(configDir)}
+
+[Install]
+WantedBy=default.target
+`;
 }
 
 export function servicePath(): string {
@@ -84,30 +126,7 @@ ${envBlock}  <key>WorkingDirectory</key><string>${xmlEscape(CONFIG_DIR)}</string
     return target;
   }
 
-  const environmentLine = home ? `Environment=AGENTSTRACK_HOME=${systemdQuote(home)}\n` : '';
-  writeFileSync(
-    target,
-    `[Unit]
-Description=AgentsTrack collector
-After=network-online.target
-# Stop respawning after 5 failures in 5 minutes so a persistently broken unit
-# (bad path, revoked key) idles instead of looping.
-StartLimitIntervalSec=300
-StartLimitBurst=5
-
-[Service]
-Type=simple
-ExecStart=${systemdQuote(nodePath)} ${systemdQuote(cliPath)} start --foreground
-# Restart on failure only; a clean exit (e.g. after logout) must stay stopped.
-Restart=on-failure
-RestartSec=10
-${environmentLine}WorkingDirectory=${CONFIG_DIR}
-
-[Install]
-WantedBy=default.target
-`,
-    'utf8',
-  );
+  writeFileSync(target, systemdUnit(nodePath, cliPath, CONFIG_DIR, home), 'utf8');
   execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
   execFileSync('systemctl', ['--user', 'enable', '--now', 'agentstrack.service'], { stdio: 'ignore' });
   return target;

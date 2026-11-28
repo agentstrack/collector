@@ -106,8 +106,8 @@ describe('wire contract', () => {
     expect(parsed).not.toHaveProperty('user_id');
   });
 
-  it('declares exactly the 18 blueprint event types', () => {
-    expect(EVENT_TYPES).toHaveLength(18);
+  it('declares the 18 blueprint event types plus rate_limit.reported', () => {
+    expect(EVENT_TYPES).toHaveLength(19);
   });
 
   it.skipIf(!serverPresent && !serverRequired)('matches the server canonical schema', () => {

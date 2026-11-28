@@ -39,8 +39,10 @@ import { redact } from '../privacy/redact.js';
  * "CommandExecution"|"FileChange"|"McpToolCall",…}}}; user_message and
  * exec_command_end are gone. Each model response also writes a top-level
  * {"type":"token_usage_record","payload":{"response_id","usage",…}} that sums
- * exactly to the thread total, so those files are billed per response and the
- * gauge is not emitted for them (normalizeTokenUsageRecord).
+ * exactly to the thread total, so a file is billed per response from its first
+ * record on, and the gauge is not emitted after that (normalizeTokenUsageRecord).
+ * Keyed on the record itself, not cli_version: a build that writes none keeps
+ * the gauge.
  */
 export const CODEX_DIR = process.env['CODEX_HOME'] ?? join(homedir(), '.codex');
 const SESSIONS_DIR = join(CODEX_DIR, 'sessions');
@@ -50,6 +52,8 @@ export class CodexAdapter implements AgentAdapter {
 
   /** Session id and model carry across lines within one rollout file. */
   private readonly fileState = new Map<string, FileState>();
+  /** Session id → the rate-limit windows last emitted, so an unchanged snapshot is not re-sent. */
+  private readonly lastRateLimits = new Map<string, string>();
 
   async detect(): Promise<DetectionResult> {
     if (!existsSync(SESSIONS_DIR)) {
@@ -100,8 +104,10 @@ export class CodexAdapter implements AgentAdapter {
     if (!state) {
       // A daemon restart resumes mid-file, after session_meta was consumed.
       // The rollout is named rollout-<ts>-<uuid>.jsonl and that uuid IS the
-      // session id (13/13 real files), so seed it from the name; model and
-      // cwd come back with the next turn_context.
+      // session id (13/13 real files), so seed it from the name. cwd and
+      // version come from session_meta on the first line (read below) —
+      // without cwd, excluded_projects could not apply until the next
+      // turn_context; model comes back with that turn_context.
       // A forked or multi-agent v2 thread is rollout-<ts>-<parent>_<child>.jsonl;
       // the trailing uuid is the child, which is this file's session.
       state = {
@@ -110,7 +116,7 @@ export class CodexAdapter implements AgentAdapter {
         callStarts: new Map(),
         seenResponseIds: new Set(),
         // Resuming mid-file can land past the first item or usage record, so the
-        // format is read from the whole file once rather than inferred from order.
+        // format and session_meta are read from the file once rather than inferred from order.
         ...rolloutFormat(ctx.sourceFile),
       };
       this.fileState.set(ctx.sourceFile, state);
@@ -119,7 +125,7 @@ export class CodexAdapter implements AgentAdapter {
     if (type === 'session_meta') {
       state.sessionId = str(payload['id']) ?? state.sessionId;
       state.version = str(payload['cli_version']);
-      state.cwd = str(payload['cwd']);
+      state.cwd = str(payload['cwd']) ?? state.cwd;
       if (!state.sessionId) return [];
       // A fork or multi-agent v2 child starts from another thread's history.
       const historyBase = (payload['history_base'] ?? {}) as Record<string, unknown>;
@@ -160,7 +166,7 @@ export class CodexAdapter implements AgentAdapter {
   ): NormalizedEvent[] {
     const kind = str(payload['type']);
 
-    if (kind === 'token_count') return this.tokenCountUsage(state, occurredAt, payload);
+    if (kind === 'token_count') return [...this.tokenCountUsage(state, occurredAt, payload), ...this.tokenCountRateLimits(state, occurredAt, payload)];
 
     if (kind === 'item_completed') return this.normalizeItemCompleted(state, occurredAt, payload);
 
@@ -235,10 +241,9 @@ export class CodexAdapter implements AgentAdapter {
       return [
         this.wrap(state, occurredAt, 'error', {
           error_kind: kind,
-          // Redacted before the truncation, for the same reason deriveTitle is:
-          // a cut through a secret leaves two halves that match no pattern, so
-          // the privacy pipeline's later pass over `message` ships the fragment.
-          message: message === undefined ? undefined : redact(message).text.slice(0, 1000),
+          // Not truncated here: the privacy pipeline caps it AFTER redacting,
+          // since a cut through a secret leaves halves no pattern matches.
+          message: message === undefined ? undefined : redact(message).text,
         }),
       ];
     }
@@ -459,6 +464,31 @@ export class CodexAdapter implements AgentAdapter {
       repo: state.cwd ? { project_path: state.cwd } : undefined,
     };
   }
+
+  /**
+   * The plan-window half of a `token_count` line, as `rate_limit.reported`.
+   * Codex repeats the same snapshot on every turn and each event counts
+   * against the org's ingest quota, so only a change is emitted.
+   */
+  private tokenCountRateLimits(
+    state: FileState,
+    occurredAt: string,
+    payload: Record<string, unknown>,
+  ): NormalizedEvent[] {
+    const rateLimits = (payload['rate_limits'] ?? {}) as Record<string, unknown>;
+    const windows = readCodexRateLimits(rateLimits);
+    if (windows.length === 0 || !state.sessionId) return [];
+    const key = JSON.stringify(windows);
+    if (this.lastRateLimits.get(state.sessionId) === key) return [];
+    this.lastRateLimits.set(state.sessionId, key);
+    return [
+      this.wrap(state, occurredAt, 'rate_limit.reported', {
+        source: 'codex',
+        windows,
+        plan_type: str(rateLimits['plan_type']),
+      }),
+    ];
+  }
 }
 
 interface FileState {
@@ -470,7 +500,13 @@ interface FileState {
   calls: Map<string, string>;
   /** call_id → when the call was made, the floor for back-dating its result. */
   callStarts: Map<string, number>;
-  /** The file has token_usage_record lines: bill per response, not the gauge. */
+  /**
+   * A token_usage_record has been seen in this file (the first-read sniff, or
+   * live, the first record line): bill per response, not the gauge. No version
+   * cutoff — some builds that write item_completed still write no records.
+   * Codex writes a response's record before its token_count, so a live file
+   * never gauges a response it then also bills.
+   */
   usageFromRecords?: boolean;
   /** The file has item_completed lines: prompts, commands and edits come from items. */
   itemMode?: boolean;
@@ -483,14 +519,31 @@ const RECORD_MARKER = Buffer.from('"type":"token_usage_record"');
 const ITEM_MARKER = Buffer.from('"type":"item_completed"');
 
 /**
- * Which rollout format a file is in, read once when the adapter first sees it.
+ * Which rollout format a file is in, plus its session_meta cwd and version,
+ * read once when the adapter first sees it — a resume mid-file has already
+ * consumed the session_meta line.
  * ponytail: a byte scan of the whole file per file per daemon start; rollouts
  * are MBs, so a streaming scan is the upgrade if they ever reach GBs.
  */
-export function rolloutFormat(path: string): { usageFromRecords: boolean; itemMode: boolean } {
+export function rolloutFormat(path: string): {
+  usageFromRecords: boolean;
+  itemMode: boolean;
+  cwd?: string;
+  version?: string;
+} {
   try {
     const data = readFileSync(path);
-    return { usageFromRecords: data.includes(RECORD_MARKER), itemMode: data.includes(ITEM_MARKER) };
+    const end = data.indexOf(0x0a);
+    const first = safeJsonParse(data.toString('utf8', 0, end === -1 ? data.length : end));
+    const meta = first && str(first['type']) === 'session_meta' ? ((first['payload'] ?? {}) as Record<string, unknown>) : {};
+    const cwd = str(meta['cwd']);
+    const version = str(meta['cli_version']);
+    return {
+      usageFromRecords: data.includes(RECORD_MARKER),
+      itemMode: data.includes(ITEM_MARKER),
+      ...(cwd ? { cwd } : {}),
+      ...(version ? { version } : {}),
+    };
   } catch {
     return { usageFromRecords: false, itemMode: false };
   }
@@ -525,6 +578,42 @@ function readCliVersion(): string | undefined {
     // Unreadable rollout tree: absent is better than fabricated.
   }
   return undefined;
+}
+
+export interface RateWindow {
+  window_minutes: number;
+  used_percent: number;
+  resets_at?: string;
+}
+
+/**
+ * Codex's `rate_limits.primary` / `.secondary` as plan windows.
+ *
+ * Keyed by `window_minutes`, never by name: real rollouts carry the 7-day
+ * window as `primary` with `secondary: null` on some plans. Only the window
+ * figures travel — the sibling `credits` block (a balance) is never read.
+ * A malformed window is skipped, not guessed at.
+ */
+export function readCodexRateLimits(rateLimits: Record<string, unknown>): RateWindow[] {
+  const windows: RateWindow[] = [];
+  for (const name of ['primary', 'secondary']) {
+    const w = rateLimits[name];
+    if (!w || typeof w !== 'object') continue;
+    const r = w as Record<string, unknown>;
+    const minutes = r['window_minutes'];
+    const used = r['used_percent'];
+    if (typeof minutes !== 'number' || !Number.isInteger(minutes) || minutes < 1 || minutes > 44_640) continue;
+    if (typeof used !== 'number' || !Number.isFinite(used) || used < 0 || used > 100) continue;
+    // Epoch seconds. Bounded so a corrupt value cannot make toISOString throw.
+    const resets = r['resets_at'];
+    const resetsOk = typeof resets === 'number' && resets > 0 && resets < 1e11;
+    windows.push({
+      window_minutes: minutes,
+      used_percent: used,
+      ...(resetsOk ? { resets_at: new Date(resets * 1000).toISOString() } : {}),
+    });
+  }
+  return windows;
 }
 
 /**

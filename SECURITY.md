@@ -4,8 +4,8 @@
 
 | Version | Supported |
 |---|---|
-| 0.1.x | ✅ Security fixes |
-| < 0.1 | ❌ Pre-release, unsupported |
+| 0.7.x | ✅ Security fixes |
+| < 0.7 | ❌ Unsupported — upgrade to the latest release |
 
 While the collector is pre-1.0 we support the latest minor line only. Please upgrade before
 reporting — `npm install -g @agentstrack/collector@latest`.
@@ -63,18 +63,30 @@ to `collector.log`.
 
 ### What it reads
 
-Agent transcripts, read-only:
+Agent transcripts and databases, read-only:
 
 - `~/.claude/projects/**/*.jsonl` (or `$CLAUDE_CONFIG_DIR`)
 - `~/.codex/sessions/**/*.jsonl` (or `$CODEX_HOME`)
+- `~/.gemini/tmp/<project>/chats/session-*.jsonl` (or `$GEMINI_CLI_HOME`)
+- `~/.kimi/sessions/**/wire.jsonl` (or `$KIMI_SHARE_DIR`), only when `kimi_code` is enabled
+- OpenCode's `opencode.db`, opened read-only with `query_only`
+- Antigravity's per-conversation databases, read from a private copy
+- the agents' account files, for the account id and label only — never a credential
+- Open Island's `/tmp/open-island-rl.json`, only with `tracking.open_island_rate_limits: true`
 
-Only `*.jsonl` files modified in the last 7 days, walked to a maximum depth of 5. It does not read
+Only `*.jsonl` files modified in the last `tracking.max_age_days` days (default 7), walked to a
+maximum depth of 5. It does not read
 your source tree, does not attach to processes, and does not modify your agent configuration — it
 installs no hooks and never writes to `~/.claude/settings.json` or `~/.codex/hooks.json`.
 
-It also runs `git log --numstat --no-merges` in repositories a session touched, when
-`tracking.git_metadata` is on, to recover commit SHAs and diffstats. That is the only subprocess it
-spawns other than `launchctl` / `systemctl` during service install.
+It also runs `git log` and `git show` in repositories a session touched, when
+`tracking.git_metadata` is on, to recover commit SHAs, changed paths and diffstats. Because the
+repository comes from a transcript, git runs with `core.fsmonitor=false`, a `cat` pager,
+`--no-ext-diff`, `--no-textconv`, no system config and no terminal prompt, so a repository's own
+config cannot make it run a program. Other subprocesses: `launchctl` / `systemctl` during service
+install, and, with `auto_update: true` (the default) on a global npm install, `npm install --global
+@agentstrack/collector@<x.y.z>` with the registry pinned to `https://registry.npmjs.org`, run from
+the OS temp directory.
 
 ### What it sends
 
@@ -92,8 +104,18 @@ requires `privacy.mode: full` **and** `privacy.prompts: full`; uploading file co
 setting it to `never` suppresses both the prompt text and the locally derived `derived_title` in
 every mode, `full` included, so nothing derived from a prompt reaches the spool.
 
-Secret redaction (15 built-in patterns plus any your organization adds) runs before the spool write,
-so a credential that appeared in a captured command line is never persisted to `spool.db` either.
+In the default `analytics` mode a shell command is sent as the whole command line, secret-redacted;
+`metadata` (or `shell_arguments: never`) sends only the binary name. File paths are sent relative to
+the project root in every mode unless `privacy.file_paths` says otherwise.
+
+Secret redaction (the built-in patterns listed in the README plus any your organization adds) runs
+before the spool write, over free text and over the short labels sent in every mode (tool, skill and
+workflow names, models, branch and project names), so a credential that appeared in a captured
+command line is never persisted to `spool.db` either.
+
+The org privacy policy is a ceiling. A registered device reads and uploads nothing until it has
+fetched that policy once, and the last policy fetched is stored in `spool.db` so an offline restart
+still applies it. A privacy mode the collector does not recognise is treated as `metadata`.
 
 ### Local state, and its limits
 
@@ -102,7 +124,7 @@ so a credential that appeared in a captured command line is never persisted to `
 | `~/.agentstrack/` | `700` | The directory itself, created owner-only |
 | `~/.agentstrack/config.yaml` | `600` | API key, collector id, privacy policy |
 | `~/.agentstrack/spool.db` (+ `-wal`, `-shm`) | `600` | Post-redaction events pending upload |
-| `~/.agentstrack/collector.log` | default umask | Counts, queue depths, error strings — never payloads |
+| `~/.agentstrack/collector.log` | default umask | Counts, queue depths, status codes, error strings — never payloads or a server's error body |
 | `~/.agentstrack/collector.pid` | default umask | Pid of a foreground collector |
 
 The directory is created mode `700`, and the two files that can carry anything sensitive — the

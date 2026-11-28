@@ -10,6 +10,173 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-28
+
+Behaviour changes worth reading before you update: a registered device reads and uploads nothing
+until it has fetched its org privacy policy at least once; that policy is re-fetched while the
+collector runs and remembered across an offline restart; with `privacy.excluded_projects` set,
+events whose project cannot be determined are dropped; plain `sync` scans transcripts when no
+collector is running, and `sync --dry-run` scans too instead of only showing the queue; `status`
+exits 0 when the device is not configured.
+
+### Added
+
+- **Plan headroom: `rate_limit.reported`.** Codex's `rate_limits` windows (used %, window length,
+  reset time) are reported when they change, keyed by window length. The `credits` balance is never
+  read. Additive: a new event type, sent only to a server that lists it in the `event_types` field of
+  `GET /v1/collector/config`, so an older backend is never handed an event it would reject.
+- `tracking.open_island_rate_limits` (default `false`): read Claude Code's 5h/7d windows from Open
+  Island's `/tmp/open-island-rl.json` and report them on the most recently active Claude session.
+  The file is refused if it is a symlink, not owned by you or over 4 KB, and its figures are labelled
+  advisory. Read only; nothing is written.
+- **`git.branch_changed` is emitted.** When a repository's branch differs from the last branch this
+  collector process read for it, a `git.branch_changed` event with `{ from, to }` (and the usual
+  `repo` context) is queued right after the event that revealed it. The first read of a repository
+  after a start is never a change, so a restart does not look like a checkout, and an event older
+  than the last one seen for that repository neither emits nor moves the remembered branch, so a
+  backfill does not emit transitions stamped in the past. Requires
+  `tracking.git_metadata` (the default) and an adapter that reports a working directory. Branch
+  names are secret-redacted like every other label.
+- **`MultiEdit` produces `file.changed`.** One event per call, with `lines_added` / `lines_removed`
+  summed over its edits. `NotebookEdit` now reads `notebook_path`, so its edits are reported too, and
+  a cell delete counts its lines as removed.
+- **`--verbose`** (global): writes event counts per scan, batch sizes and server status codes to the
+  log and to stderr, prefixed `[verbose]`. Never payloads, prompts, paths or keys.
+- **`start --foreground --agent <id>`**: run only the named agents for this run, overriding
+  `tracking.agents`. Repeatable or comma-separated. An unknown id, or `--agent` without
+  `--foreground`, exits 2 — the service runs without flags, so the override could not reach it.
+- Config warnings: an unknown key (`privacy.excluded_project`, say) is still accepted, so a config
+  from a newer collector loads, but it now prints `unknown config key '…' is ignored`.
+  `tracking.process_metrics: false` warns that the key has no effect.
+
+### Changed
+
+- **No collection until the org policy is known.** Privacy is applied when an event is queued, so an
+  event spooled under the local mode before the org's ceiling arrived would later be uploaded at the
+  looser mode. A registered device with no org policy in force — never fetched, and none stored from
+  an earlier fetch — now neither reads transcripts nor uploads until `GET /v1/collector/config`
+  succeeds once. Read offsets do not advance meanwhile, so nothing is lost: the first scan after the
+  fetch picks everything up. The log says `No org policy yet … not reading or uploading until it is`
+  once.
+- **The org privacy policy is refreshed while the collector runs, and survives a restart offline.**
+  `GET /v1/collector/config` was read once per daemon start; it is now re-fetched every 10 minutes,
+  and every minute until the first fetch succeeds. The last policy fetched (mode ceiling and
+  redaction rules) is stored in the spool as the `org_policy` meta key, so a collector that starts
+  with no network still clamps to it instead of to the local file alone. A stored policy that cannot
+  be parsed is ignored, which means holding collection as above. `sync`, `sync --full` and
+  `sync --dry-run` fetch the policy before scanning.
+- **An org privacy mode this collector does not recognise is treated as `metadata`** — in the
+  register response, the config response and the stored policy. Previously an unknown value could be
+  written into `config.yaml` as-is. The config response is now validated; an unreadable one is an
+  error and is retried. A single malformed org redaction rule is dropped on its own rather than
+  making the whole response unreadable.
+- **With `privacy.excluded_projects` set, events whose project is unknown are dropped.** An event,
+  from a transcript or from a database-backed adapter (OpenCode, Antigravity), that carries neither a
+  working directory nor a repository path cannot be shown not to belong to an excluded project, so it
+  is not sent; the count is logged. Exclusion also now
+  matches on the adapter's repository path when there is no working directory. Nothing changes when
+  the list is empty.
+- **Plain `sync` scans before uploading when no collector is running**, so it sends what
+  `sync --dry-run` showed; on a fresh install the queue is empty until something has read the
+  transcripts. When a collector is running (its pidfile is live), plain `sync` neither scans nor
+  uploads and says the running collector does both — two readers of the same files would each
+  resume from their own checkpoints, and two uploaders of the same queue would send every in-flight
+  event twice. `sync --full` still scans and uploads.
+- **`sync --dry-run` scans transcripts.** It used to list only the head of the queue, up to
+  `upload.batch_size` events, so new transcript lines and anything past the first batch were not
+  shown. It now copies the spool to a temporary directory, runs one scan against the copy, and lists
+  every event that copy holds: what is queued plus what the next scan would add. No event is
+  uploaded, no read checkpoint or queue row is written to the real spool, and the copy is deleted
+  afterwards, including on Ctrl-C. It does contact the server for the org policy, and writes no scan
+  counts to the log. `--full` with `--dry-run` is still ignored, with a notice. On a registered
+  device that has never fetched its org policy and cannot reach the server, it says
+  `Org policy not fetched yet — can't preview …` and exits 1 instead of claiming nothing would be
+  sent.
+- **`status` and `status --json` exit 0 when the device is not configured.** `configured` and
+  `logged_in` (or the `Not configured` line) carry that state. `status --json` used to exit 1.
+- `summary --days` must be a whole number from 1 to 30; anything else exits 2 instead of being
+  silently clamped.
+- `doctor` lists agents that are not installed as `- <agent> not installed` instead of counting
+  each one as a problem. It still reports a problem when none of `tracking.agents` is installed.
+- An invalid config file now lists each problem as `path: message`, one per line.
+- `stop` says `Collector was not running.` when there was neither a service nor a foreground
+  collector, instead of claiming to have stopped one.
+- `sync` exits 1 with a clear message when the server rejects the API key.
+
+### Fixed
+
+- **No spurious `session.ended` on stop or restart.** Stopping the daemon, an auto-update restart and
+  the end of `sync --full` emitted `session.ended` (`reason: unknown`) for every open session,
+  cutting it short. Sessions now end only on the idle timeout. The idle check is also skipped while a
+  backfill is still reading a file, so a session is not ended at the point the read has reached.
+  The open sessions are stored in the spool (`open_sessions` meta key, entries older than 7 days
+  dropped), so a session that went quiet before a restart, an auto-update or a one-shot `sync` is
+  ended by whichever collector process runs next.
+- **Codex: live token usage is no longer counted twice.** A live rollout could be gauged from its
+  `token_count` totals before its first `token_usage_record` appeared, and then billed per record as
+  well. A file is now billed per record from the first record seen, with no version cutoff.
+- **Codex: the working directory is recovered when a file is resumed mid-way**, from the first
+  line's `session_meta`, so `excluded_projects` and repository context apply before the next
+  `turn_context`.
+- **A 400 or 422 on a multi-event batch no longer strikes every event in it.** The batch is halved
+  and retried, as a `413` already was, until the bad event is alone and only it is struck. A one-shot
+  `sync` keeps halving within the same run, so the good events are delivered before it exits.
+- Skipped org redaction rules are numbered by their index in the server's list, so `#N` matches the
+  rule the admin configured; a malformed element is logged as `org redaction rule #N skipped:
+  malformed` instead of being dropped silently and shifting every later number.
+- A stale `Uploads: paused` recorded by an earlier process is cleared on the next upload pass that
+  is not itself paused, so `status` stops reporting a pause that no longer applies.
+- `status` and `doctor` no longer create `spool.db` when it does not exist.
+- A request that hits the client timeout reports `request timed out after Ns` instead of
+  `This operation was aborted`.
+
+### Security
+
+- Events already queued by 0.6.x when you upgrade upload with 0.6.x's filtering: redaction runs
+  when an event is queued, not when it is sent. Upgrading while online and letting the queue drain
+  first avoids this.
+
+- The `zod` range is now `^4.6.7`, so a global install can never resolve a version affected by
+  [GHSA-mrhx-c7xc-m3w5](https://github.com/advisories/GHSA-mrhx-c7xc-m3w5). 0.6.1 fixed only the
+  lockfile, which `npm install -g` ignores.
+
+- **Labels are secret-redacted in every mode, `metadata` included.** `workflow_name`, `skill`,
+  `subagent_type`, `agent_type`, `agent_kind`, `agent_id`, `tool_name`, `abort_reason`,
+  `stop_reason`, `error_kind`, `model`, `plan_type`, `branch`, `project_name`, `repo.branch`,
+  `repo.project_name` and `git.branch_changed`'s `from` / `to` come from transcripts or the
+  repository and were sent unscanned. A match is counted in `secrets_redacted` like any other.
+- **More built-in secret patterns:** `npm_…`, `glpat-…`, `hf_…`, SendGrid `SG.….…`, Google OAuth
+  `ya29.…`, `Authorization: Basic …`, `Authorization: Token …`, `Cookie:` / `Set-Cookie:` headers,
+  `--token` / `--api-key` / `--secret` / `--access-token`-style flags, `curl -u user:pass`, and
+  `key=value`, `key: value`, query-string and JSON (including backslash-escaped JSON inside a shell
+  string) assignments in any case where the key ends in `secret`, `token`, `password`, `pwd`,
+  `api_key`, `access_key`, `private_key` or `secret_key`. `pass` and `auth` count as keys only with
+  `=` or as a quoted JSON key. Prefixed tokens (`AKIA`, `AIza`, `npm_`, `hf_`, JWTs, …) are now
+  found inside identifiers such as MCP tool names, where `_` used to hide them.
+- **`metadata` mode's binary name is the real command.** Leading `NAME=value` assignments and the
+  `sudo`, `env`, `command`, `nohup` and `time` wrappers (and their flags) are skipped, and the
+  basename is sent: `API_TOKEN=abc npm test` used to send `API_TOKEN=abc` as the "binary". The same
+  applies under `shell_arguments: never`.
+- **`error.message` and `abort_reason` are truncated after redaction** (1000 and 50 characters),
+  not before, so a cut cannot split a secret into fragments no pattern matches.
+- **Path prefixes are segment-bounded.** A file under `/u/app-secret` is no longer treated as inside
+  project `/u/app` (which sent it as `-secret/…`), and the same holds for the home directory.
+- `basic_auth_url` (`scheme://user:pass@host`) is matched in linear time on long inputs.
+- **Org redaction rules are checked harder.** A rule with more than one unbounded quantifier
+  (`*`, `+`, `{n,}`, `{n,m}` with m ≥ 100) is rejected in addition to the nested-quantifier,
+  backreference and length checks. A skipped rule is logged by index and reason, never its pattern.
+- **Server error bodies are never logged.** A failed request logs its status and, at most, the
+  server's `error` code, redacted and capped at 120 characters; a 4xx can echo back what was sent.
+- **Self-update installs only a plain `x.y.z` version** from the registry's answer, pins
+  `https://registry.npmjs.org` for the package and its scope on the command line, and runs npm from
+  the OS temp directory, so neither a user `.npmrc` registry setting nor the `.npmrc` of whatever
+  project the collector was started in can redirect an unattended install.
+- **systemd unit values are escaped.** `%` is doubled everywhere and `$` in `ExecStart=`; a path
+  containing a newline is refused rather than written into the unit.
+- **git runs with the repository's own hooks and drivers disabled:** `core.fsmonitor=false`, a
+  `cat` pager, `--no-ext-diff`, `--no-textconv`, no system config and no terminal prompts. The
+  repository comes from a transcript, so its config must not get to run a program.
+
 ## [0.6.2] - 2026-11-26
 
 ### Fixed
@@ -591,8 +758,15 @@ Initial release.
 
 ### Known limitations
 
-As released. Several of these have since been fixed — see `## Unreleased` above, and
+As released. Several of these have since been fixed — see the later sections above, and
 [ROADMAP.md](./ROADMAP.md) for what is still outstanding.
+
+> **Superseded (as of 0.7.0):** `idle_timeout_seconds` is used by the collector to end quiet
+> sessions (0.3.0); `session.ended` is emitted (0.3.0) and `git.branch_changed` too (0.7.0);
+> the backfill window is `tracking.max_age_days` (0.2.1); `event_id` is derived from content
+> (0.3.0); Node 24 is the floor (0.6.0). Still true: `process_metrics` has no effect,
+> `shell_arguments: full` equals `redact_secrets`, `heartbeat` and `model.request` are not
+> emitted, `task_category` is not populated, and the service installer is launchd and systemd only.
 
 - `tracking.idle_timeout_seconds` and `tracking.process_metrics` are accepted and validated but not
   yet used by the collector; time accounting is derived server-side from the event stream.
@@ -611,7 +785,8 @@ As released. Several of these have since been fixed — see `## Unreleased` abov
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/agentstrack/collector/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/agentstrack/collector/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/agentstrack/collector/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/agentstrack/collector/compare/v0.5.0...v0.6.0

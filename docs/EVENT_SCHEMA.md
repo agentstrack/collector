@@ -6,7 +6,7 @@ collector does not send it.
 The collector and the AgentsTrack server validate against the same shape. The collector's copy lives
 in [`src/schema.ts`](../src/schema.ts); the canonical payload schemas live in the server's
 `@agentstrack/event-schema` package. `npm test` includes a contract test: it always asserts the 18
-event types and that the envelope carries no tenancy fields, and additionally diffs the enums against
+blueprint event types plus `rate_limit.reported`, and that the envelope carries no tenancy fields, and additionally diffs the enums against
 the server's generated `EVENT_SCHEMA.json` **when the server repository is checked out alongside this
 one** — that comparison is skipped, not failed, when it is not.
 
@@ -15,7 +15,7 @@ one** — that comparison is skipped, not failed, when it is not.
 - **Body:** `{ "events": [ … ] }`, 1–500 events. The collector sends `upload.batch_size` (default
   100) every `upload.interval_seconds` (default 30), gzipped when the JSON exceeds 1 KB.
 - **Idempotency:** ingestion is idempotent on `event_id`, so retrying a batch after a timeout cannot
-  double-count.
+  double-count, and because ids are derived from the source line, neither can re-reading a file.
 - **Response:** `{ "accepted": 97, "duplicates": 3, "rejected": [] }`
 
 ---
@@ -48,14 +48,14 @@ Every event, from every adapter, has exactly this shape.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `event_id` | UUID | ✅ | Generated locally at enqueue. The idempotency key. |
+| `event_id` | UUID | ✅ | The idempotency key. Derived locally and deterministically: from the adapter, file, byte offset and line content for a transcript line; from `message.id` for a Claude Code `model.response`; from the session and SHA for `git.commit`. OpenCode's events, read from database rows, get a random id. |
 | `schema_version` | `1` | ✅ | Literal. A different value is rejected, not coerced. |
 | `occurred_at` | ISO-8601 with offset | ✅ | Taken from the agent's own log line — when it happened, not when it uploaded. An event carrying `duration_ms` is stamped at the **start** of the work it measures (see [Timing](#timing-duration_ms-is-start-anchored)). |
 | `collector_id` | UUID | ✅ | Assigned by the server at registration. Identifies the machine. |
 | `session_id` | string (1–200) | ✅ | The **agent-native** session id, stable for the session's lifetime. |
 | `agent` | enum | ✅ | `claude_code` · `codex` · `gemini_cli` · `opencode` · `cursor` · `cline` · `copilot_cli` · `antigravity` · `kimi_code` · `other` |
 | `agent_version` | string (≤50) | — | As reported by the agent in its own log. |
-| `event_type` | enum | ✅ | One of the 18 below. |
+| `event_type` | enum | ✅ | One of the 19 below. |
 | `payload` | object | ✅ | Defaults to `{}`. Shape depends on `event_type`. |
 
 Unknown payload keys are **kept, not rejected** — a newer collector talking to an older server
@@ -64,31 +64,33 @@ collector that cannot drain its spool would lose a developer's whole day.
 
 ---
 
-## Which of the 18 the collector emits today
+## Which of the 19 the collector emits today
 
-The schema is the contract; 0.1.0 does not fill all of it. Nothing here is aspirational —
-this column is what the adapters in this repository actually produce.
+The schema is the contract; 0.7.0 does not fill all of it. Nothing here is aspirational —
+this column is what the adapters in this repository actually produce. Gemini CLI, Antigravity and
+Kimi Code are covered in the README's per-agent notes.
 
 | Event type | Claude Code | Codex | OpenCode | Source |
 |---|---|---|---|---|
 | `session.started` | — | ✅ | ✅ | `session_meta` line / `session` row |
-| `session.ended` | ✅ | ✅ | ✅ | daemon idle timeout (`reason: timeout`, `unknown` on shutdown) / `session.time_archived` or `time_compacting` |
+| `session.ended` | ✅ | ✅ | ✅ | daemon idle timeout (`reason: timeout`; not emitted on shutdown or restart, nor while a backfill is still reading the file) / `session.time_archived` or `time_compacting` |
 | `user.prompted` | ✅ | ✅ | ✅ | `user` line / `user_message`, or a `UserMessage` item on Codex ≥0.15x / `text` part of a user message |
 | `agent.turn.started` | — | ✅ | — | `turn_context` |
 | `agent.turn.ended` | — | ✅ | — | `task_complete`, `turn_aborted` (`aborted: true`) |
-| `model.request` | — | — | — | not emitted in 0.1.0 |
+| `model.request` | — | — | — | not emitted |
 | `model.response` | ✅ | — | — | `assistant` line with `usage` |
 | `tool.started` | ✅ | ✅ | — | `tool_use` / `function_call`, `custom_tool_call` |
 | `tool.completed` | ✅ | ✅ | ✅ | `tool_result` / `*_output`, `McpToolCall` item / `tool` part, `status: completed` |
 | `tool.failed` | ✅ | ✅ | ✅ | `is_error` / `exec_command_end` exit code, `Exit code: N` output header / `status: error` |
 | `file.read` | ✅ | ✅ | ✅ | `Read` tool / pager & `cat`-family commands / `read` tool part |
-| `file.changed` | ✅ | ✅ | ✅ | `Edit`/`Write` input / `apply_patch` body or `FileChange` item / `edit` & `write` tool parts |
+| `file.changed` | ✅ | ✅ | ✅ | `Edit`/`MultiEdit`/`Write`/`NotebookEdit` input / `apply_patch` body or `FileChange` item / `edit` & `write` tool parts |
 | `command.executed` | ✅ | ✅ | ✅ | `Bash` tool input / `exec_command_end` or `CommandExecution` item / `bash` tool part |
 | `git.commit` | ✅ | ✅ | ✅ | `git log` in repos a session touched — not from the transcript |
-| `git.branch_changed` | — | — | — | not emitted in 0.1.0 |
+| `git.branch_changed` | ✅ | ✅ | ✅ | the daemon, when a repo's branch differs from the last read in this process — not from the transcript. Any adapter that reports a working directory |
 | `usage.reported` | — | ✅ | ✅ | `token_usage_record` per response (`cumulative: false`), or `token_count` totals on older Codex / `session` row totals (`cumulative: true`) |
 | `error` | — | ✅ | — | `error` / `stream_error` |
-| `heartbeat` | — | — | — | not emitted in 0.1.0 |
+| `heartbeat` | — | — | — | not emitted |
+| `rate_limit.reported` | opt-in | ✅ | — | `token_count.rate_limits` on change / Open Island's `/tmp/open-island-rl.json` with `tracking.open_island_rate_limits` — sent only to a server that lists it in `event_types` |
 
 OpenCode emits no `tool.started`: one `part` row carries the whole call, so the terminal event is
 timestamped at the call's **start** and carries the real `duration_ms`. The server backfills the
@@ -112,7 +114,7 @@ count the duration a second time, after the work was over.
 at the end and sent a duration on Codex turn ends; the `event_id` of a re-read line does not depend
 on `occurred_at`, so a re-read never duplicates an event that already uploaded.
 
-Fields the schema allows but 0.1.0 never populates: `task_category`, `latency_ms`,
+Fields the schema allows but the collector never populates: `task_category`, `latency_ms`,
 `model.response.turn_id`, `file.read.lines`, `error.fatal`. `reported_cost_usd` is populated by
 OpenCode only — it is the one agent here that records what the provider actually charged.
 
@@ -181,6 +183,22 @@ Absent on every event from the main transcript.
 | `agent_kind` | `subagent` \| `workflow` | `workflow` when the file sits under `subagents/workflows/`. |
 | `agent_type` | string | `agentType` from the sibling `agent-<id>.meta.json` — `general-purpose`, `workflow-subagent`, a custom agent name. Absent when the meta file is missing. |
 
+### Redacted in every mode
+
+The privacy mode decides which fields are **deleted**; it never decides whether a surviving field is
+scanned. On every event, in every mode including `metadata`, the built-in secret rules and the org's
+rules run over:
+
+- free text that survives the mode strip: `prompt_text`, `derived_title`, `message`, `command`,
+  `description`;
+- labels, which are never stripped: `tool_name`, `skill`, `subagent_type`, `agent_type`,
+  `agent_kind`, `agent_id`, `workflow_name`, `model`, `plan_type`, `stop_reason`, `error_kind`,
+  `abort_reason`, `branch`, `project_name`, `from`, `to` (`git.branch_changed`), and
+  `repo.branch` / `repo.project_name`.
+
+Length caps are applied **after** redaction: `message` 1000, `abort_reason` 50, `derived_title` 120
+characters. A cut made first could split a secret into pieces no pattern matches.
+
 ### `secrets_redacted`
 
 Present on **any** event where local redaction fired, in **every** privacy mode including
@@ -189,8 +207,8 @@ the value.
 
 | Field | Type | Notes |
 |---|---|---|
-| `kind` | string | The rule that matched: a built-in name (`aws_access_key`, `github_token`, …) or `org_rule` for anything your organization added — an org rule name can itself describe the shape of that org's secrets, so it is never sent. |
-| `count` | int ≥ 1 | How many matches that rule replaced across the event's text fields. A secret echoed in both a prompt and its derived title counts twice. |
+| `kind` | string | The rule that matched: a built-in name (`aws_access_key`, `github_token`, `token_auth_header`, `cookie_header`, … — the full list is in the README) or `org_rule` for anything your organization added — an org rule name can itself describe the shape of that org's secrets, so it is never sent. |
+| `count` | int ≥ 1 | How many matches that rule replaced across the event's text fields and labels. A secret echoed in both a prompt and its derived title counts twice. |
 
 ```json
 "secrets_redacted": [
@@ -220,7 +238,7 @@ session's working directory.
 
 ---
 
-## The 18 event types
+## The 19 event types
 
 ### Session lifecycle
 
@@ -262,7 +280,7 @@ The event where privacy mode is most visible.
 |---|---|---|
 | `prompt_chars` | int ≥ 0 | all modes — a **count**, not the text |
 | `derived_title` | string (≤200) | `analytics`, `full` — the first meaningful line of the prompt, computed **on your machine**: the prompt is secret-redacted first, then truncated to 120 characters, then the raw text is deleted. Redaction before truncation is what stops a key that straddles the cut from shipping as an unmatchable fragment (fixed in 0.4.1). Dropped under `privacy.prompts: never` in every mode, and in `metadata` by the mode itself |
-| `task_category` | enum | schema only — not populated in 0.1.0 |
+| `task_category` | enum | schema only — not populated |
 | `ultracode` | `true` | all modes — present only when the prompt contains the whole word `ultracode` (case-insensitive). A boolean computed locally before redaction; the prompt is not uploaded to find it. |
 | `prompt_text` | string | **`full` mode with `privacy.prompts: full` only.** Redacted first; absent entirely otherwise. |
 | `account` | `Account` | all modes — but `label` and `org` only in `analytics` and `full`. See below. |
@@ -313,6 +331,26 @@ A usage snapshot, for agents that report totals rather than per-request numbers.
 | `reported_cost_usd` | number ≥ 0 | Only when the agent exposes a cost. Drives `basis: REPORTED` rather than `ESTIMATED`. OpenCode's `session.cost` is a real settled provider charge and lands here. |
 | `plan_type` | string | Subscription plan where known — a subscription "cost" is always an API-equivalent estimate and is labelled as such. |
 
+#### `rate_limit.reported`
+
+How much of a subscription plan's rate-limit windows is used, as the agent reports it. Added after
+the 18 blueprint types: the collector sends it only to a server whose `GET /v1/collector/config`
+lists it in `event_types`, because a batch an older server rejects in full pauses the upload. It is
+not activity — it moves no session's last-activity time and no time bucket.
+
+| Field | Type | Notes |
+|---|---|---|
+| `source` | `codex` \| `open_island` ✅ | Where the figures came from. `open_island` readings are advisory. |
+| `windows` | array, 1–4 ✅ | `{ window_minutes: int 1–44640, used_percent: 0–100, resets_at?: ISO-8601 }`. Keyed by length: Codex's `primary` is the 7-day window on some plans. |
+| `plan_type` | string | Codex's `rate_limits.plan_type`. |
+
+Codex: read from `token_count.rate_limits.primary`/`.secondary`, and emitted only when the windows
+change (Codex repeats the snapshot every turn). The sibling `credits` block is never read.
+Claude Code: only with `tracking.open_island_rate_limits: true`, from the file Open Island writes
+(`five_hour` → 300, `seven_day` → 10080 minutes), attached to the most recently active Claude
+session. The file is refused when it is a symlink, not owned by the user or over 4 KB, and it names
+no account, so with several Claude profiles it describes whichever last ran its status line.
+
 ### Tools
 
 #### `tool.started` / `tool.completed` / `tool.failed`
@@ -344,7 +382,7 @@ The `completed` / `failed` event repeats them, because that is the one the serve
 | Field | Type | Notes |
 |---|---|---|
 | `path` | string ✅ | Subject to `privacy.file_paths`. |
-| `lines` | int | Line count. Never the lines. Not populated in 0.1.0. |
+| `lines` | int | Line count. Never the lines. Not populated. |
 
 #### `file.changed`
 
@@ -355,6 +393,9 @@ The `completed` / `failed` event repeats them, because that is the one the serve
 | `lines_added` | int ≥ 0 | Computed locally from the tool input or patch body. |
 | `lines_removed` | int ≥ 0 | Same. Lines present on both sides count as neither. |
 
+Claude Code: a `MultiEdit` call is **one** `file.changed`, with the counts summed over its edits. A
+`NotebookEdit` reads `notebook_path`; a cell delete counts the cell's lines as removed.
+
 Counts only. The diff itself is deleted by the privacy pipeline before upload, which is why the
 counts have to be derived in the adapter.
 
@@ -362,7 +403,7 @@ counts have to be derived in the adapter.
 
 | Field | Type | Notes |
 |---|---|---|
-| `command` | string ✅ | The command line, with the 15 built-in secret rules applied — this is the default (`shell_arguments: redact_secrets`). Set `shell_arguments: never` to truncate it to the first whitespace token. |
+| `command` | string ✅ | In `analytics` and `full`: the whole command line, with the built-in and org secret rules applied (`shell_arguments: redact_secrets`, the default; `full` behaves the same). In `metadata`, or under `shell_arguments: never`: the binary's basename only, skipping leading `NAME=value` assignments and the `sudo` / `env` / `command` / `nohup` / `time` wrappers. |
 | `exit_code` | int | Codex only. |
 | `duration_ms` | int ≥ 0 | Codex only. The event is stamped at the command's start. |
 
@@ -387,11 +428,18 @@ Commit **messages and diffs are not sent.**
 
 #### `git.branch_changed`
 
-| Field | Type |
-|---|---|
-| `to` | string ✅ |
-| `from` | string |
-| `repo` | `RepoContext` |
+Emitted by the daemon, not read from a transcript. Each scan reads the branch of every repository a
+session's working directory is in; when it differs from the last branch **this collector process**
+read for that repository, the event is queued right after the event that revealed it, on the same
+session and timestamp. The first read of a repository after a start is never a change, so a restart
+is not a checkout. Needs `tracking.git_metadata: true` (the default). `from` and `to` are
+secret-redacted in every mode, like `branch`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `to` | string ✅ | The branch now checked out. |
+| `from` | string | The branch read before. Always present as emitted by the collector. |
+| `repo` | `RepoContext` | As on other events; its `branch` is the new one. |
 
 ### Diagnostics
 
@@ -400,8 +448,8 @@ Commit **messages and diffs are not sent.**
 | Field | Type | Notes |
 |---|---|---|
 | `error_kind` | string ✅ | Classification — Codex emits `error` or `stream_error`. |
-| `message` | string (≤1000) | Truncated at the adapter, then redacted, then **deleted entirely in `metadata` mode**. |
-| `fatal` | boolean | Defaults to `false`. Not populated in 0.1.0. |
+| `message` | string (≤1000) | Redacted, then cut to 1000 characters by the privacy pipeline; **deleted entirely in `metadata` mode**. |
+| `fatal` | boolean | Defaults to `false`. Not populated. |
 
 ---
 
@@ -489,5 +537,6 @@ file contents, no absolute path, no git remote URL.
 agentstrack sync --dry-run --print
 ```
 
-Runs the full privacy pipeline over your own queued events, prints the literal JSON, and uploads
-nothing.
+Scans your transcripts into a throwaway copy of the spool, runs the full privacy pipeline, and
+prints the literal JSON of everything that copy would upload — queued events plus what the next
+scan adds. It uploads nothing and writes nothing back; its one request is for the org policy.

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Collector, UPLOAD_PAUSE_META } from '../daemon.js';
+import { Collector, ORG_POLICY_META, UPLOAD_PAUSE_META } from '../daemon.js';
 import { Config } from '../config.js';
 import { Spool } from './spool.js';
 import { ApiError, type BatchResult } from '../transport/client.js';
@@ -41,6 +41,8 @@ function setup(events: number, batchSize: number, respond: (call: number, batch:
   dirs.push(dir);
   const spool = new Spool(join(dir, 'spool.db'));
   spool.enqueue(Array.from({ length: events }, event));
+  // A known org policy: without one a registered collector holds its uploads.
+  spool.setMeta(ORG_POLICY_META, JSON.stringify({ privacy_mode: 'full', redaction_rules: [] }));
   let calls = 0;
   const client = {
     sendBatch: vi.fn((batch: EventEnvelope[]) => respond(calls++, batch)),
@@ -78,6 +80,29 @@ describe('Collector.flush', () => {
     await collector.flush();
     expect(collector.uploadState().batchSize).toBe(2);
     expect(spool.depth()).toBe(4); // the 413 batch stays, the sibling was acked
+  });
+
+  it('halves from the batch that failed, not from the configured size', async () => {
+    // 10 events at batch size 8, concurrency 4: one wave of 8 + 2. The 2 fails.
+    const { collector } = setup(10, 8, async (_call, batch) => {
+      if (batch.length === 2) throw new ApiError('invalid', 422, false);
+      return ok(batch.length);
+    });
+    await collector.flush(1);
+    expect(collector.uploadState().batchSize).toBe(1);
+  });
+
+  it('holds uploads while a registered collector has no org policy', async () => {
+    const { spool, client, collector } = setup(2, 2, async (_call, batch) => ok(batch.length));
+    spool.deleteMeta(ORG_POLICY_META);
+    const fresh = new Collector(
+      Config.parse({ api_key: 'at_test', collector_id: '00000000-0000-4000-8000-000000000000', tracking: { git_metadata: false, agents: [] } }),
+      { spool, client },
+    );
+    expect(await fresh.flush()).toBe(false);
+    expect(client.sendBatch).not.toHaveBeenCalled();
+    expect(spool.depth()).toBe(2);
+    collector.stop();
   });
 
   it('counts one failure per wave, not one per batch', async () => {
@@ -175,8 +200,21 @@ describe('poll', () => {
     expect(spool.getMeta('opencode:started:ses_a')).toBeNull();
     enqueue.mockRestore();
     // @ts-expect-error private
-    expect(await collector.pollAdapter(poll, 'c1', undefined)).toBe(1);
+    expect(await collector.pollAdapter(poll, 'c1', undefined)).toEqual({ queued: 1, dropped: 0 });
     expect(spool.getMeta('opencode:started:ses_a')).toBe('1');
+  });
+
+  it('drops a polled event with no known project while excluded_projects is set, and counts it', async () => {
+    const { spool, collector } = setup(0, 1, async () => ok(0));
+    // @ts-expect-error private
+    collector.config = { ...collector.config, privacy: { ...collector.config.privacy, excluded_projects: ['/w/secret'] } };
+    const poll = async () => [
+      { event: { ...event(), event_type: 'session.started' as const, payload: {} } },
+      { event: { ...event(), event_type: 'session.started' as const, payload: {} }, cwd: '/w/public' },
+    ];
+    // @ts-expect-error private
+    expect(await collector.pollAdapter(poll, 'c1', undefined)).toEqual({ queued: 1, dropped: 1 });
+    expect(spool.depth()).toBe(1);
   });
 });
 
@@ -198,5 +236,55 @@ describe('idle session.ended', () => {
     expect(ended[0]!.payload).toEqual({ external_session_id: 's1', reason: 'timeout' });
     expect(Date.parse(ended[0]!.occurred_at)).toBe(Date.parse(quiet.occurred_at) + 120_000);
     expect(ended[0]!.event_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
+
+describe('event types the server has not announced', () => {
+  it('drops rate_limit.reported until the server lists it in event_types', () => {
+    const { spool, collector } = setup(0, 1, async () => ok(0));
+    const item = () => ({
+      event: {
+        ...event(),
+        event_type: 'rate_limit.reported' as const,
+        payload: { source: 'codex', windows: [{ window_minutes: 300, used_percent: 5 }] },
+      },
+      eventId: randomUUID(),
+    });
+    // @ts-expect-error private — an older server: no event_types at all
+    collector.serverConfig = { privacy_mode: 'analytics', redaction_rules: [] };
+    // @ts-expect-error private
+    expect(collector.enqueue([item()], 'c1')).toBe(0);
+    // @ts-expect-error private
+    collector.serverConfig = { privacy_mode: 'analytics', redaction_rules: [], event_types: ['rate_limit.reported'] };
+    // @ts-expect-error private
+    expect(collector.enqueue([item()], 'c1')).toBe(1);
+    expect(spool.depth()).toBe(1);
+  });
+});
+
+describe('Open Island plan windows', () => {
+  it('attach to the newest Claude session once per file change and never count as activity', () => {
+    const { spool, collector } = setup(0, 1, async () => ok(0));
+    const dir = mkdtempSync(join(tmpdir(), 'agentstrack-oi-'));
+    dirs.push(dir);
+    const path = join(dir, 'rl.json');
+    writeFileSync(path, '{"five_hour":{"used_percentage":29}}');
+    // @ts-expect-error private
+    collector.serverConfig = { privacy_mode: 'analytics', redaction_rules: [], event_types: ['rate_limit.reported'] };
+    // @ts-expect-error private
+    collector.openSessions.set('claude_code::old', { agent: 'claude_code', sessionId: 'old', lastAtMs: 1 });
+    // @ts-expect-error private
+    collector.openSessions.set('claude_code::new', { agent: 'claude_code', sessionId: 'new', lastAtMs: 2 });
+    // @ts-expect-error private
+    collector.openSessions.set('codex::x', { agent: 'codex', sessionId: 'x', lastAtMs: 3 });
+
+    // @ts-expect-error private
+    expect(collector.reportOpenIslandRateLimits(path)).toBe(1);
+    // @ts-expect-error private
+    expect(collector.reportOpenIslandRateLimits(path)).toBe(0); // unchanged file
+    const [sent] = spool.peek(10);
+    expect(sent!.event).toMatchObject({ session_id: 'new', event_type: 'rate_limit.reported', payload: { source: 'open_island' } });
+    // @ts-expect-error private — the reading did not move the session's last activity
+    expect(collector.openSessions.get('claude_code::new').lastAtMs).toBe(2);
   });
 });
