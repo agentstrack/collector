@@ -102,8 +102,10 @@ export class CodexAdapter implements AgentAdapter {
     if (!state) {
       // A daemon restart resumes mid-file, after session_meta was consumed.
       // The rollout is named rollout-<ts>-<uuid>.jsonl and that uuid IS the
-      // session id (13/13 real files), so seed it from the name; model and
-      // cwd come back with the next turn_context.
+      // session id (13/13 real files), so seed it from the name. cwd and
+      // version come from session_meta on the first line (read below) —
+      // without cwd, excluded_projects could not apply until the next
+      // turn_context; model comes back with that turn_context.
       // A forked or multi-agent v2 thread is rollout-<ts>-<parent>_<child>.jsonl;
       // the trailing uuid is the child, which is this file's session.
       state = {
@@ -112,7 +114,7 @@ export class CodexAdapter implements AgentAdapter {
         callStarts: new Map(),
         seenResponseIds: new Set(),
         // Resuming mid-file can land past the first item or usage record, so the
-        // format is read from the whole file once rather than inferred from order.
+        // format and session_meta are read from the file once rather than inferred from order.
         ...rolloutFormat(ctx.sourceFile),
       };
       this.fileState.set(ctx.sourceFile, state);
@@ -121,7 +123,10 @@ export class CodexAdapter implements AgentAdapter {
     if (type === 'session_meta') {
       state.sessionId = str(payload['id']) ?? state.sessionId;
       state.version = str(payload['cli_version']);
-      state.cwd = str(payload['cwd']);
+      state.cwd = str(payload['cwd']) ?? state.cwd;
+      // A live rollout is first seen before its first token_usage_record is
+      // written; a gauge emitted then would bill on top of the records.
+      if (writesUsageRecords(state.version)) state.usageFromRecords = true;
       if (!state.sessionId) return [];
       // A fork or multi-agent v2 child starts from another thread's history.
       const historyBase = (payload['history_base'] ?? {}) as Record<string, unknown>;
@@ -237,10 +242,9 @@ export class CodexAdapter implements AgentAdapter {
       return [
         this.wrap(state, occurredAt, 'error', {
           error_kind: kind,
-          // Redacted before the truncation, for the same reason deriveTitle is:
-          // a cut through a secret leaves two halves that match no pattern, so
-          // the privacy pipeline's later pass over `message` ships the fragment.
-          message: message === undefined ? undefined : redact(message).text.slice(0, 1000),
+          // Not truncated here: the privacy pipeline caps it AFTER redacting,
+          // since a cut through a secret leaves halves no pattern matches.
+          message: message === undefined ? undefined : redact(message).text,
         }),
       ];
     }
@@ -510,14 +514,40 @@ const RECORD_MARKER = Buffer.from('"type":"token_usage_record"');
 const ITEM_MARKER = Buffer.from('"type":"item_completed"');
 
 /**
- * Which rollout format a file is in, read once when the adapter first sees it.
+ * Codex builds from 0.150 bill per response (token_usage_record). Known from
+ * session_meta, before the first record exists in a live file.
+ */
+export function writesUsageRecords(cliVersion: string | undefined): boolean {
+  const m = /^(\d+)\.(\d+)\./.exec(cliVersion ?? '');
+  return m !== null && (Number(m[1]) > 0 || Number(m[2]) >= 150);
+}
+
+/**
+ * Which rollout format a file is in, plus its session_meta cwd and version,
+ * read once when the adapter first sees it — a resume mid-file has already
+ * consumed the session_meta line.
  * ponytail: a byte scan of the whole file per file per daemon start; rollouts
  * are MBs, so a streaming scan is the upgrade if they ever reach GBs.
  */
-export function rolloutFormat(path: string): { usageFromRecords: boolean; itemMode: boolean } {
+export function rolloutFormat(path: string): {
+  usageFromRecords: boolean;
+  itemMode: boolean;
+  cwd?: string;
+  version?: string;
+} {
   try {
     const data = readFileSync(path);
-    return { usageFromRecords: data.includes(RECORD_MARKER), itemMode: data.includes(ITEM_MARKER) };
+    const end = data.indexOf(0x0a);
+    const first = safeJsonParse(data.toString('utf8', 0, end === -1 ? data.length : end));
+    const meta = first && str(first['type']) === 'session_meta' ? ((first['payload'] ?? {}) as Record<string, unknown>) : {};
+    const cwd = str(meta['cwd']);
+    const version = str(meta['cli_version']);
+    return {
+      usageFromRecords: data.includes(RECORD_MARKER) || writesUsageRecords(version),
+      itemMode: data.includes(ITEM_MARKER),
+      ...(cwd ? { cwd } : {}),
+      ...(version ? { version } : {}),
+    };
   } catch {
     return { usageFromRecords: false, itemMode: false };
   }

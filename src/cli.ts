@@ -2,8 +2,9 @@
 import { Command } from 'commander';
 import pc from 'picocolors';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { platform, arch } from 'node:os';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { platform, arch, tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { machineInfo } from './machine.js';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -11,7 +12,10 @@ import { stringify } from 'yaml';
 import {
   CONFIG_PATH, DEFAULT_API_URL, LOG_PATH, PID_PATH, SPOOL_PATH, loadConfig, saveConfig, Config, configExists,
 } from './config.js';
-import { Collector, VERSION, buildAdapters, errorMessage, listTranscripts, log } from './daemon.js';
+import {
+  Collector, UPLOAD_PAUSE_META, VERSION, buildAdapters, errorMessage, knownAgentIds, listTranscripts, log, setVerbose,
+  toPrivacyMode,
+} from './daemon.js';
 import { ApiClient, ApiError } from './transport/client.js';
 import { Spool } from './queue/spool.js';
 import { installService, uninstallService, servicePath } from './commands/service.js';
@@ -22,7 +26,10 @@ const program = new Command();
 program
   .name('agentstrack')
   .description('Privacy-first telemetry collector for AI coding agents')
-  .version(VERSION);
+  .version(VERSION)
+  // Counts, batch sizes and status codes — never payloads, prompts, paths or keys.
+  .option('--verbose', 'log event counts, batch sizes and server status codes')
+  .hook('preAction', () => setVerbose(Boolean(program.opts<{ verbose?: boolean }>().verbose)));
 
 // ------------------------------------------------------------------ login
 
@@ -98,11 +105,11 @@ program
       });
       config.collector_id = result.collector_id;
       // The org policy is a ceiling. A developer who chose a stricter mode
-      // keeps it — login must never widen what leaves this machine.
-      const effectiveMode = clampPrivacyMode(
-        config.privacy.mode,
-        result.privacy_mode as Config['privacy']['mode'],
-      );
+      // keeps it — login must never widen what leaves this machine. A mode
+      // this build does not know is the strictest, never written as-is: an
+      // invalid mode would make the config unloadable.
+      const orgMode = toPrivacyMode(result.privacy_mode);
+      const effectiveMode = clampPrivacyMode(config.privacy.mode, orgMode);
       config.privacy = { ...config.privacy, mode: effectiveMode };
       saveConfig(config);
 
@@ -110,9 +117,7 @@ program
       console.log(`  Collector: ${pc.dim(result.collector_id)}`);
       console.log(
         `  Privacy:   ${pc.bold(effectiveMode)}` +
-          (effectiveMode !== result.privacy_mode
-            ? pc.dim(` (your local setting; org allows ${result.privacy_mode})`)
-            : ''),
+          (effectiveMode !== orgMode ? pc.dim(` (your local setting; org allows ${orgMode})`) : ''),
       );
       console.log(`  Config:    ${pc.dim(CONFIG_PATH)}`);
       console.log(`\nNext: ${pc.cyan('agentstrack start')}`);
@@ -160,7 +165,13 @@ program
   .command('start')
   .description('Start collecting (installs a background service unless --foreground)')
   .option('-f, --foreground', 'run in this terminal instead of as a service')
-  .action(async (options: { foreground?: boolean }) => {
+  .option(
+    '--agent <id>',
+    'only collect from this agent (repeatable or comma-separated; with --foreground, overrides tracking.agents)',
+    (value: string, previous: string[]) => [...previous, ...value.split(',').map((v) => v.trim()).filter(Boolean)],
+    [] as string[],
+  )
+  .action(async (options: { foreground?: boolean; agent: string[] }) => {
     // Exit 0 (not 1) when unauthenticated: the launchd/systemd unit runs
     // `start --foreground`, and a non-zero exit makes the supervisor respawn it
     // on a loop. A clean exit lets it idle until the user logs in again.
@@ -170,7 +181,24 @@ program
       log(msg);
       return;
     }
-    const config = loadConfig();
+    let config = loadConfig();
+    if (options.agent.length > 0) {
+      const known = knownAgentIds(config);
+      const unknown = options.agent.filter((a) => !known.includes(a));
+      if (unknown.length > 0) {
+        console.error(pc.red('✗') + ` Unknown agent: ${unknown.join(', ')}. Known: ${known.join(', ')}`);
+        process.exitCode = 2;
+        return;
+      }
+      // The service runs `start --foreground` with no flags, so the override
+      // could not reach it; say so rather than install something else.
+      if (!options.foreground) {
+        console.error(pc.red('✗') + ' --agent applies to --foreground runs. For the service, set tracking.agents in the config.');
+        process.exitCode = 2;
+        return;
+      }
+      config = { ...config, tracking: { ...config.tracking, agents: [...new Set(options.agent)] } };
+    }
 
     if (!options.foreground) {
       const cliPath = fileURLToPath(import.meta.url);
@@ -226,8 +254,10 @@ program
   .description('Stop the collector and remove its background service')
   .action(() => {
     const unit = uninstallService();
-    if (existsSync(PID_PATH)) killCollector();
-    console.log(pc.green('✓') + (unit ? ` Service removed (${unit}).` : ' Collector stopped.'));
+    const killed = existsSync(PID_PATH) && killCollector();
+    if (unit) console.log(pc.green('✓') + ` Service removed (${unit}).`);
+    if (killed) console.log(pc.green('✓') + ' Collector stopped.');
+    if (!unit && !killed) console.log('Collector was not running.');
   });
 
 // ------------------------------------------------------------------ inspect
@@ -236,13 +266,12 @@ program
   .command('status')
   .description('Show collector health, queue depth and detected agents')
   .option('--json', 'machine-readable output')
+  // Exits 0 whether or not this device is configured, with or without --json:
+  // `configured` / `logged_in` (or the "Not configured" line) carry the state.
   .action(async (options: { json?: boolean }) => {
     if (options.json) {
       const config = configExists() ? loadConfig() : null;
-      const spool = new Spool(SPOOL_PATH);
-      const depth = spool.depth();
-      const pausedReason = spool.getMeta('upload_paused_reason');
-      spool.close();
+      const { depth, pausedReason } = readSpool();
       const agents = config
         ? await Promise.all(
             buildAdapters(config).map(async (a) => ({ agent: a.id, ...(await a.health()) })),
@@ -267,7 +296,6 @@ program
           2,
         ),
       );
-      if (!config?.api_key) process.exitCode = 1;
       return;
     }
     if (!configExists()) {
@@ -275,12 +303,9 @@ program
       return;
     }
     const config = loadConfig();
-    const spool = new Spool(SPOOL_PATH);
-    const depth = spool.depth();
     // Track F1 pauses uploads (e.g. over quota) by writing a reason here; show
     // it so a growing queue does not look like an unexplained failure.
-    const pausedReason = spool.getMeta('upload_paused_reason');
-    spool.close();
+    const { depth, pausedReason } = readSpool();
 
     console.log(pc.bold('AgentsTrack collector') + pc.dim(` v${VERSION}`));
     console.log(`  Logged in:   ${config.api_key ? pc.green('yes') : pc.red('no')}`);
@@ -317,7 +342,12 @@ program
       process.exitCode = 1;
       return;
     }
-    const days = Math.min(Math.max(Number.parseInt(options.days, 10) || 7, 1), 30);
+    const days = Number(options.days);
+    if (!Number.isInteger(days) || days < 1 || days > 30) {
+      console.error(pc.red('✗') + ` --days must be a whole number from 1 to 30, got '${options.days}'.`);
+      process.exitCode = 2;
+      return;
+    }
     // The key stays in this process: callers get totals, never the credential.
     const client = new ApiClient({ apiUrl: config.api_url, apiKey: config.api_key, timeoutMs: 15_000 });
     try {
@@ -366,10 +396,16 @@ program
     check(Boolean(config.collector_id), 'device registered', 'Run: agentstrack login <api-key> again');
 
     console.log('\n' + pc.bold('Agents'));
+    let installed = 0;
     for (const adapter of buildAdapters(config)) {
       const detection = await adapter.detect();
-      check(detection.installed, `${adapter.id} sessions found`, detection.note);
-      if (!detection.installed) continue;
+      // An agent this developer simply does not use is not a problem.
+      if (!detection.installed) {
+        console.log(`  ${pc.dim('-')} ${adapter.id} ${pc.dim('not installed')}`);
+        continue;
+      }
+      installed += 1;
+      check(true, `${adapter.id} sessions found`);
       if (detection.watchPaths.length > 0) {
         const files = detection.watchPaths.flatMap((p) => listTranscripts(p, config.tracking.max_age_days));
         const days = config.tracking.max_age_days;
@@ -380,6 +416,9 @@ program
         const health = await adapter.health();
         console.log(`    ${pc.dim(`${health.filesTracked} session(s) in ${detection.note ?? 'the agent database'}`)}`);
       }
+    }
+    if (installed === 0) {
+      check(false, 'a supported agent is installed', 'None of tracking.agents has sessions on this machine.');
     }
 
     console.log('\n' + pc.bold('Connectivity'));
@@ -395,9 +434,7 @@ program
     }
 
     console.log('\n' + pc.bold('Queue'));
-    const spool = new Spool(SPOOL_PATH);
-    const depth = spool.depth();
-    spool.close();
+    const { depth } = readSpool();
     check(depth < 10_000, `queue depth ${depth}`, 'A large backlog means uploads are failing — check the log.');
     console.log(`    ${pc.dim(`log: ${LOG_PATH}`)}`);
 
@@ -437,7 +474,7 @@ program
 program
   .command('sync')
   .description('Upload any queued events now and exit')
-  .option('--dry-run', 'show what would be uploaded without sending anything')
+  .option('--dry-run', 'scan and show what would be uploaded, after privacy filtering, without sending or saving anything')
   .option('--print', 'with --dry-run, print the full event bodies')
   .option(
     '--full',
@@ -447,23 +484,37 @@ program
     const config = requireLogin();
 
     if (options.dryRun) {
-      // --full has to forget the checkpoints to find out what a re-read would
-      // produce, and a dry run that mutates state is not a dry run. Say so
-      // rather than accept the flag and quietly ignore it.
+      // Say so rather than accept --full and quietly ignore it.
       if (options.full) {
-        console.log(
-          pc.yellow('!') +
-            ' --full is ignored with --dry-run: computing it means clearing read checkpoints, which a dry run must not do.',
-        );
-        console.log(pc.dim('  Showing the currently queued events instead.\n'));
+        console.log(pc.yellow('!') + ' --full is ignored with --dry-run.');
+        console.log(pc.dim('  Showing what the next scan and upload would send instead.\n'));
       }
       // The privacy claim made verifiable: this is exactly what would leave
-      // the machine, after redaction, with nothing sent.
-      const spool = new Spool(SPOOL_PATH);
-      const pending = spool.peek(config.upload.batch_size);
-      spool.close();
+      // the machine, after redaction, with nothing sent. The scan runs against
+      // a throwaway copy of the spool — its queue and read checkpoints — so it
+      // finds what the daemon would, and no offset or event is persisted.
+      const dir = mkdtempSync(join(tmpdir(), 'agentstrack-dry-run-'));
+      let pending: ReturnType<Spool['peek']>;
+      try {
+        const copy = join(dir, 'spool.db');
+        if (existsSync(SPOOL_PATH)) {
+          const real = new Spool(SPOOL_PATH);
+          try {
+            real.snapshotTo(copy);
+          } finally {
+            real.close();
+          }
+        }
+        const spool = new Spool(copy);
+        const collector = new Collector(config, { spool });
+        await collector.scanOnce();
+        pending = spool.peek(Number.MAX_SAFE_INTEGER);
+        collector.stop();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
       if (pending.length === 0) {
-        console.log(pc.green('✓') + ' Nothing queued — nothing would be sent.');
+        console.log(pc.green('✓') + ' Nothing queued and nothing new in transcripts — nothing would be sent.');
         return;
       }
       console.log(`${pending.length} event(s) would be sent to ${config.api_url}:\n`);
@@ -518,7 +569,13 @@ program
     console.log(`Uploading ${before} queued events…`);
     await collector.flush();
     const after = collector.queueDepth();
+    const paused = collector.uploadState().paused;
     collector.stop();
+    if (paused === 'auth') {
+      console.error(pc.red('✗') + ' The server rejected the API key. Run ' + pc.cyan('agentstrack login') + ' with a valid key.');
+      process.exitCode = 1;
+      return;
+    }
     console.log(
       after === 0
         ? pc.green('✓') + ` Uploaded ${before} events.`
@@ -550,7 +607,7 @@ program
  * confirming the pid still belongs to a collector — a stale file may now point
  * at an unrelated, recycled pid, which we must not kill.
  */
-function killCollector(): void {
+function killCollector(): boolean {
   const pid = Number(readFileSync(PID_PATH, 'utf8').trim());
   const removePid = () => {
     try {
@@ -561,7 +618,7 @@ function killCollector(): void {
   };
   if (!Number.isInteger(pid) || pid <= 0) {
     removePid();
-    return;
+    return false;
   }
   let command = '';
   try {
@@ -569,19 +626,35 @@ function killCollector(): void {
   } catch {
     // No such process — the pid file is stale.
     removePid();
-    return;
+    return false;
   }
   if (!command.includes('agentstrack')) {
     // The pid was recycled by an unrelated process; drop the stale file only.
     removePid();
-    return;
+    return false;
   }
+  let killed = true;
   try {
     process.kill(pid, 'SIGTERM');
   } catch {
-    // Process already exited.
+    killed = false; // Process already exited.
   }
   removePid();
+  return killed;
+}
+
+/**
+ * Queue depth and upload pause, read without creating a spool that is not
+ * there: a read-only command must not leave a database behind.
+ */
+function readSpool(): { depth: number; pausedReason: string | null } {
+  if (!existsSync(SPOOL_PATH)) return { depth: 0, pausedReason: null };
+  const spool = new Spool(SPOOL_PATH);
+  try {
+    return { depth: spool.depth(), pausedReason: spool.getMeta(UPLOAD_PAUSE_META) };
+  } finally {
+    spool.close();
+  }
 }
 
 /** True when a foreground collector holds the pid file. */
@@ -602,9 +675,7 @@ function isRunning(): boolean {
 async function doctorJson(): Promise<boolean> {
   const configured = configExists();
   const config = configured ? loadConfig() : null;
-  const spool = new Spool(SPOOL_PATH);
-  const depth = spool.depth();
-  spool.close();
+  const { depth } = readSpool();
 
   const agents = config
     ? await Promise.all(
@@ -706,7 +777,8 @@ function requireLogin(): Config {
   return config;
 }
 
-program.parseAsync(process.argv).catch((error: unknown) => {
+/** Settles when the command has run; exported so tests can await a whole invocation. */
+export const done = program.parseAsync(process.argv).catch((error: unknown) => {
   console.error(pc.red('✗') + ` ${errorMessage(error)}`);
   log(`CLI error: ${errorMessage(error)}`);
   process.exit(1);

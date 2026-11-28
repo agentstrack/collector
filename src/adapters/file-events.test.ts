@@ -179,3 +179,29 @@ describe('CodexAdapter file events', () => {
     }
   });
 });
+
+describe('ClaudeCodeAdapter MultiEdit and NotebookEdit', () => {
+  const events = run(new ClaudeCodeAdapter(), fixture('claude-multiedit.jsonl'));
+  const changed = events.filter((e) => e.event.event_type === 'file.changed');
+  const at = (path: string) => changed.filter((e) => e.event.payload['path'] === path);
+
+  it('emits one file.changed per MultiEdit call with the edits summed', () => {
+    const multi = at('/Users/dev/Web/api/src/cost.ts');
+    expect(multi).toHaveLength(1);
+    // Edit 1: +2 -1. Edit 2: +1 -2.
+    expect(multi[0]!.event.payload).toMatchObject({ change_kind: 'edit', lines_added: 3, lines_removed: 3 });
+  });
+
+  it('reads notebook_path and counts the inserted cell, never carrying its source', () => {
+    const nb = at('/Users/dev/Web/api/analysis.ipynb');
+    expect(nb).toHaveLength(1);
+    expect(nb[0]!.event.payload).toMatchObject({ change_kind: 'edit', lines_added: 3, lines_removed: 0 });
+    expect(JSON.stringify(events)).not.toContain('pandas');
+  });
+
+  it('counts NotebookEdit modes from new_source alone', () => {
+    expect(countEditLines('NotebookEdit', { edit_mode: 'replace', new_source: 'a\nb' })).toEqual({ lines_added: 2, lines_removed: 0 });
+    expect(countEditLines('NotebookEdit', { edit_mode: 'delete', new_source: 'a\nb' })).toEqual({ lines_added: 0, lines_removed: 0 });
+    expect(countEditLines('MultiEdit', { edits: 'nope' })).toEqual({ lines_added: 0, lines_removed: 0 });
+  });
+});

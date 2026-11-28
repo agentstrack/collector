@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexAdapter, fileChangeTouches, rolloutFormat } from './codex.js';
 import type { NormalizedEvent } from './types.js';
@@ -166,10 +167,65 @@ describe('CodexAdapter, forked and multi-agent threads', () => {
   });
 });
 
+describe('CodexAdapter, live and resumed rollouts', () => {
+  const line = (timestamp: string, type: string, payload: Record<string, unknown>) =>
+    JSON.stringify({ timestamp, type, payload });
+  const meta = (version: string) =>
+    line('2026-11-20T09:00:00.000Z', 'session_meta', { id: '0c000000-0000-4000-8000-0000000000aa', cwd: '/w/secret', cli_version: version });
+  const tokenCount = line('2026-11-20T09:00:01.000Z', 'event_msg', {
+    type: 'token_count',
+    info: { total_token_usage: { input_tokens: 30000, cached_input_tokens: 0, output_tokens: 900 } },
+  });
+  const record = line('2026-11-20T09:00:02.000Z', 'token_usage_record', {
+    response_id: 'r1',
+    usage: { input_tokens: 5000, cached_input_tokens: 0, output_tokens: 100 },
+  });
+
+  it('does not bill a gauge seen before the first token_usage_record of a ≥0.150 rollout', () => {
+    // The file is first read before Codex has written any record.
+    const usage = ofType(run([meta('0.165.0'), tokenCount, record]), 'usage.reported');
+    expect(usage).toHaveLength(1);
+    expect(usage[0]!.event.payload).toMatchObject({ cumulative: false, usage: { input_tokens: 5000 } });
+  });
+
+  it('keeps the gauge for an older rollout with no records', () => {
+    const usage = ofType(run([meta('0.120.0'), tokenCount]), 'usage.reported');
+    expect(usage).toHaveLength(1);
+    expect(usage[0]!.event.payload['cumulative']).toBe(true);
+  });
+
+  it('recovers cwd from session_meta when resuming mid-file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentstrack-codex-'));
+    try {
+      const file = join(dir, 'rollout-2026-11-20T09-00-00-0c000000-0000-4000-8000-0000000000aa.jsonl');
+      const prompt = line('2026-11-20T09:00:03.000Z', 'event_msg', { type: 'user_message', message: 'hi' });
+      writeFileSync(file, `${meta('0.120.0')}\n${prompt}\n`);
+      // A fresh adapter (daemon restart) sees only the line after the checkpoint.
+      const [event] = run([prompt], file);
+      expect(event!.cwd).toBe('/w/secret');
+      expect(event!.event.agent_version).toBe('0.120.0');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves the error message whole for the pipeline to cap after redaction', () => {
+    const long = 'x'.repeat(1500);
+    const [event] = run([meta('0.120.0'), line('2026-11-20T09:00:04.000Z', 'event_msg', { type: 'error', message: long })]).filter(
+      (e) => e.event.event_type === 'error',
+    );
+    expect(event!.event.payload['message']).toHaveLength(1500);
+  });
+});
+
 describe('rolloutFormat / fileChangeTouches', () => {
   it('reads the format off the whole file and treats a missing file as legacy', () => {
-    expect(rolloutFormat(fixturePath('codex-session-v2.jsonl'))).toEqual({ usageFromRecords: true, itemMode: true });
-    expect(rolloutFormat(fixturePath('codex-session.jsonl'))).toEqual({ usageFromRecords: false, itemMode: false });
+    expect(rolloutFormat(fixturePath('codex-session-v2.jsonl'))).toEqual({
+      usageFromRecords: true, itemMode: true, cwd: '/Users/dev/Web/api', version: '0.165.0',
+    });
+    expect(rolloutFormat(fixturePath('codex-session.jsonl'))).toEqual({
+      usageFromRecords: false, itemMode: false, cwd: '/Users/dev/Downloads/rtls', version: '0.120.0',
+    });
     expect(rolloutFormat('/nonexistent/rollout.jsonl')).toEqual({ usageFromRecords: false, itemMode: false });
   });
 
