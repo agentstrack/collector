@@ -331,8 +331,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         if (toolName === 'Bash' && command) {
           events.push(wrap('command.executed', { command }));
         }
-        const filePath = str(input['file_path']);
-        if (filePath && (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit')) {
+        // NotebookEdit names its file notebook_path; older builds used file_path.
+        const filePath = str(input['file_path']) ?? (toolName === 'NotebookEdit' ? str(input['notebook_path']) : undefined);
+        if (filePath && EDIT_TOOLS.has(toolName)) {
           events.push(
             wrap('file.changed', {
               path: filePath,
@@ -438,9 +439,31 @@ export function countEditLines(
   input: Record<string, unknown>,
 ): { lines_added: number; lines_removed: number } {
   if (toolName === 'Write') return { lines_added: splitLines(str(input['content'])).length, lines_removed: 0 };
-  if (toolName === 'NotebookEdit') return diffLines(str(input['old_source']), str(input['new_source']));
+  if (toolName === 'NotebookEdit') {
+    // The input holds the new cell only; the replaced or deleted cell's
+    // source is not in the transcript, so removals are counted only when an
+    // old_source is present.
+    if (str(input['edit_mode']) === 'delete') return diffLines(str(input['old_source']), undefined);
+    return diffLines(str(input['old_source']), str(input['new_source']));
+  }
+  if (toolName === 'MultiEdit') {
+    // One file.changed per call, summed over its edits — what `git diff
+    // --numstat` would report for the file.
+    const edits = Array.isArray(input['edits']) ? (input['edits'] as unknown[]) : [];
+    const total = { lines_added: 0, lines_removed: 0 };
+    for (const edit of edits) {
+      if (!edit || typeof edit !== 'object') continue;
+      const counts = countEditLines('Edit', edit as Record<string, unknown>);
+      total.lines_added += counts.lines_added;
+      total.lines_removed += counts.lines_removed;
+    }
+    return total;
+  }
   return diffLines(str(input['old_string']), str(input['new_string']));
 }
+
+/** Tools whose input describes a file change this adapter turns into file.changed. */
+const EDIT_TOOLS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit']);
 
 function splitLines(text: string | undefined): string[] {
   if (!text) return [];
