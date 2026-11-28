@@ -118,6 +118,7 @@ counts are computed in the adapter, because the privacy pipeline deletes `old_st
 | **`config get` / `set` / `edit`** | Open. Edit the YAML by hand today. Any implementation must keep the "invalid config is a hard error, never a silent fallback" rule — a `config set` that writes an unparseable file and shrugs is worse than no command. |
 | **`task_category`** | Open. In the schema, never populated. Would be a local classifier over the prompt — and it must run locally and discard the prompt, exactly as `derived_title` does. |
 | **Windows** | Open. The service installer is launchd + systemd. `agentstrack start --foreground` works anywhere Node 24+ does, so the gap is specifically a Scheduled Task or service wrapper, plus path handling review. Wanted, and needs someone who runs Windows to own it. |
+| **Git SHAs counted as secrets** | Open. `generic_hex_secret` redacts any 40+ hex run, so `git show <sha>` and `a1b2…..HEAD` ship as `[REDACTED:hex]` and count in `secrets_redacted`. That fails safe (an old GitHub OAuth token is also 40 hex), which is why it is not simply narrowed. The fix is recognising git context, such as an argument to `git show/log/diff/checkout/revert/cherry-pick/reset` or a `..` range, and a test that a bare 40-hex value outside that context is still redacted. |
 | **Standalone binary / Homebrew** | In progress on the `feat/standalone-binary` branch: a single-executable build with checksums and attestations, an installer, and a Homebrew tap, so the collector can run without a global npm install. Not released. |
 
 ---
