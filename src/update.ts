@@ -60,6 +60,15 @@ export function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+/**
+ * Plain `x.y.z` only. The registry's answer becomes an npm argument, so
+ * anything else — a prerelease, a range, `latest`, a `git+https:` spec, a
+ * leading `-` that npm would read as a flag — is refused outright.
+ */
+export function isReleaseVersion(value: unknown): value is string {
+  return typeof value === 'string' && /^\d+\.\d+\.\d+$/.test(value);
+}
+
 /** The newest non-prerelease version on the registry, or null if unreachable. */
 export async function latestVersion(timeoutMs = 10_000): Promise<string | null> {
   const controller = new AbortController();
@@ -72,7 +81,7 @@ export async function latestVersion(timeoutMs = 10_000): Promise<string | null> 
     if (!res.ok) return null;
     const body = (await res.json()) as { 'dist-tags'?: Record<string, string> };
     const latest = body['dist-tags']?.latest;
-    return typeof latest === 'string' && !latest.includes('-') ? latest : null;
+    return isReleaseVersion(latest) ? latest : null;
   } catch {
     // Offline, DNS down, registry having a day. Never fatal: a collector that
     // cannot check for updates must still collect.
@@ -110,16 +119,31 @@ export function npmEnv(execPath: string, env: NodeJS.ProcessEnv): NodeJS.Process
   return { ...env, PATH: [dirname(execPath), env['PATH']].filter(Boolean).join(delimiter) };
 }
 
+/**
+ * The registry is pinned on the command line: a user or project `.npmrc` that
+ * points `@agentstrack` (or everything) at a mirror must not decide what an
+ * unattended updater installs. No --ignore-scripts: better-sqlite3 needs its
+ * install script to fetch or build the native binding.
+ */
+export function installArgs(version: string): string[] {
+  return [
+    'install',
+    '--global',
+    `${PACKAGE_NAME}@${version}`,
+    '--prefer-online',
+    '--registry=https://registry.npmjs.org',
+    '--@agentstrack:registry=https://registry.npmjs.org',
+  ];
+}
+
 /** Install an exact version globally. Returns the version actually on disk after. */
 export async function installVersion(version: string, timeoutMs = 180_000): Promise<string | null> {
   // Exact version, never a range or a dist-tag: whatever was decided from the
   // registry read is what gets installed, so the log line and the artifact
   // cannot disagree.
+  if (!isReleaseVersion(version)) throw new Error('refusing to install a version that is not x.y.z');
   const env = npmEnv(process.execPath, process.env);
-  await run('npm', ['install', '--global', `${PACKAGE_NAME}@${version}`, '--prefer-online'], {
-    timeout: timeoutMs,
-    env,
-  });
+  await run('npm', installArgs(version), { timeout: timeoutMs, env });
   try {
     const { stdout } = await run('npm', ['ls', '--global', '--depth', '0', '--json'], {
       timeout: 30_000,

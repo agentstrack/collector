@@ -84,6 +84,7 @@ export const Config = z.object({
       max_age_days: z.number().int().min(1).max(3650).default(7),
       idle_timeout_seconds: z.number().int().min(30).max(3600).default(120),
       git_metadata: z.boolean().default(true),
+      /** @deprecated Parsed for old configs; nothing reads it. `false` draws a warning. */
       process_metrics: z.boolean().default(true),
       /**
        * Read Claude Code's 5h/7d plan windows from Open Island's
@@ -125,17 +126,64 @@ export const Config = z.object({
 });
 export type Config = z.infer<typeof Config>;
 
+/**
+ * Things in a config file that parse but do nothing.
+ *
+ * Unknown keys are still accepted — a config written by a newer collector must
+ * load after a downgrade — but silently ignoring them hid typos in privacy
+ * controls: `privacy.excluded_project` excluded nothing and said nothing.
+ */
+export function configWarnings(raw: unknown): string[] {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const defaults = Config.parse({}) as Record<string, unknown>;
+  const warnings: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    if (!(key in Config.shape)) {
+      warnings.push(`unknown config key '${key}' is ignored`);
+      continue;
+    }
+    const section = defaults[key];
+    if (!section || typeof section !== 'object' || Array.isArray(section)) continue;
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    // Every nested key has a default, so the parsed defaults list them all.
+    for (const sub of Object.keys(value)) {
+      if (!(sub in section)) warnings.push(`unknown config key '${key}.${sub}' is ignored`);
+    }
+  }
+  const tracking = (raw as Record<string, unknown>)['tracking'];
+  // Only `false` is worth a word: saveConfig writes every default, so `true`
+  // is in every config login ever wrote, and turning it off is the one
+  // setting someone expects to do something.
+  if (tracking && typeof tracking === 'object' && (tracking as Record<string, unknown>)['process_metrics'] === false) {
+    warnings.push(`'tracking.process_metrics' is deprecated and has no effect`);
+  }
+  return warnings;
+}
+
+/** Warned once per process, however many times the config is loaded. */
+const warned = new Set<string>();
+
 export function loadConfig(): Config {
   if (!existsSync(CONFIG_PATH)) return Config.parse({});
+  let raw: unknown;
   try {
-    return Config.parse(parse(readFileSync(CONFIG_PATH, 'utf8')) ?? {});
+    raw = parse(readFileSync(CONFIG_PATH, 'utf8')) ?? {};
   } catch (error) {
+    throw new Error(`Config at ${CONFIG_PATH} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const parsed = Config.safeParse(raw);
+  if (!parsed.success) {
     // A hand-edited config that no longer parses must not silently revert to
     // defaults — that could quietly widen the privacy mode.
-    throw new Error(
-      `Config at ${CONFIG_PATH} is invalid: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    const lines = parsed.error.issues.map((issue) => `  ${issue.path.join('.') || '(root)'}: ${issue.message}`);
+    throw new Error(`Config at ${CONFIG_PATH} is invalid:\n${lines.join('\n')}`);
   }
+  for (const warning of configWarnings(raw)) {
+    if (warned.has(warning)) continue;
+    warned.add(warning);
+    console.warn(`agentstrack: ${CONFIG_PATH}: ${warning}`);
+  }
+  return parsed.data;
 }
 
 export function saveConfig(config: Config): void {

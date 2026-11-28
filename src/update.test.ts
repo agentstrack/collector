@@ -1,6 +1,31 @@
 import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { compareVersions, npmEnv, selfUpdatable } from './update.js';
+import { compareVersions, installArgs, installVersion, isReleaseVersion, npmEnv, selfUpdatable } from './update.js';
+
+describe('isReleaseVersion — the registry answer becomes an npm argument', () => {
+  it('accepts plain x.y.z only', () => {
+    expect(isReleaseVersion('0.7.0')).toBe(true);
+    expect(isReleaseVersion('10.20.30')).toBe(true);
+    for (const bad of ['0.7.0-rc.1', 'latest', '^0.7.0', '--prefix=/tmp', 'git+https://x/y.git', '0.7', ' 0.7.0', '0.7.0\n', 7, undefined]) {
+      expect(isReleaseVersion(bad), String(bad)).toBe(false);
+    }
+  });
+
+  it('installVersion refuses before running npm', async () => {
+    await expect(installVersion('1.0.0 --registry=https://evil.example')).rejects.toThrow(/x\.y\.z/);
+  });
+
+  it('pins the registry for the package and its scope', () => {
+    expect(installArgs('0.7.0')).toEqual(
+      expect.arrayContaining([
+        '@agentstrack/collector@0.7.0',
+        '--registry=https://registry.npmjs.org',
+        '--@agentstrack:registry=https://registry.npmjs.org',
+      ]),
+    );
+    expect(installArgs('0.7.0')).not.toContain('--ignore-scripts');
+  });
+});
 
 describe('compareVersions', () => {
   it('orders releases', () => {
