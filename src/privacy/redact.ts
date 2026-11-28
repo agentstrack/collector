@@ -24,6 +24,9 @@ export interface RedactionRule {
 /** Org rules run on at most this many characters; built-ins see the whole value. */
 export const ORG_SUBJECT_CAP = 64 * 1024;
 
+// Prefixed tokens are anchored on alphanumerics, not `\b`: `_` is a word
+// character, so `\bnpm_…` missed a token embedded in an MCP tool name
+// (`mcp__npm_<36>__get`) or a snake_case identifier (`srv_hf_…`).
 export const BUILTIN_RULES: RedactionRule[] = [
   { name: 'anthropic_key', pattern: /sk-ant-[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:anthropic_key]' },
   { name: 'openai_key', pattern: /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:openai_key]' },
@@ -31,19 +34,23 @@ export const BUILTIN_RULES: RedactionRule[] = [
   { name: 'github_pat', pattern: /github_pat_[A-Za-z0-9_]{20,}/g, replacement: '[REDACTED:github_pat]' },
   { name: 'slack_token', pattern: /xox[baprs]-[A-Za-z0-9-]{10,}/g, replacement: '[REDACTED:slack_token]' },
   { name: 'stripe_key', pattern: /[rs]k_(?:live|test)_[A-Za-z0-9]{16,}/g, replacement: '[REDACTED:stripe_key]' },
-  { name: 'aws_access_key', pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, replacement: '[REDACTED:aws_access_key]' },
-  { name: 'google_api_key', pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, replacement: '[REDACTED:google_api_key]' },
-  { name: 'google_oauth_token', pattern: /\bya29\.[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:google_oauth_token]' },
-  { name: 'npm_token', pattern: /\bnpm_[A-Za-z0-9]{36}\b/g, replacement: '[REDACTED:npm_token]' },
-  { name: 'gitlab_token', pattern: /\bglpat-[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:gitlab_token]' },
-  { name: 'huggingface_token', pattern: /\bhf_[A-Za-z0-9]{30,}\b/g, replacement: '[REDACTED:huggingface_token]' },
-  { name: 'sendgrid_key', pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, replacement: '[REDACTED:sendgrid_key]' },
-  { name: 'agentstrack_key', pattern: /\bat_(?:live|test)_[a-f0-9]{16}_[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:agentstrack_key]' },
+  { name: 'aws_access_key', pattern: /(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, replacement: '[REDACTED:aws_access_key]' },
+  { name: 'google_api_key', pattern: /(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{35}(?![A-Za-z0-9])/g, replacement: '[REDACTED:google_api_key]' },
+  { name: 'google_oauth_token', pattern: /(?<![A-Za-z0-9])ya29\.[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:google_oauth_token]' },
+  { name: 'npm_token', pattern: /(?<![A-Za-z0-9])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9])/g, replacement: '[REDACTED:npm_token]' },
+  { name: 'gitlab_token', pattern: /(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:gitlab_token]' },
+  { name: 'huggingface_token', pattern: /(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, replacement: '[REDACTED:huggingface_token]' },
+  { name: 'sendgrid_key', pattern: /(?<![A-Za-z0-9])SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, replacement: '[REDACTED:sendgrid_key]' },
+  { name: 'agentstrack_key', pattern: /(?<![A-Za-z0-9])at_(?:live|test)_[a-f0-9]{16}_[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:agentstrack_key]' },
   { name: 'private_key', pattern: /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----/g, replacement: '[REDACTED:private_key]' },
-  { name: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, replacement: '[REDACTED:jwt]' },
+  { name: 'jwt', pattern: /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9])/g, replacement: '[REDACTED:jwt]' },
   { name: 'bearer_header', pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{20,}=*/g, replacement: 'Bearer [REDACTED]' },
   { name: 'basic_auth_header', pattern: /\b(authorization:\s*basic\s+)[A-Za-z0-9+/]{8,}=*/gi, replacement: '$1[REDACTED]' },
-  { name: 'basic_auth_url', pattern: /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/g, replacement: '$1[REDACTED]@' },
+  { name: 'token_auth_header', pattern: /\b(authorization:\s*token\s+)[^\s"'\\]+/gi, replacement: '$1[REDACTED]' },
+  // Every cookie on the line is a session credential; the header runs to the
+  // end of the line or the shell string that holds it.
+  { name: 'cookie_header', pattern: /\b((?:set-)?cookie:[ \t]*)[^\r\n"'\\]+/gi, replacement: '$1[REDACTED]' },
+  { name: 'basic_auth_url', pattern: /(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/g, replacement: '$1[REDACTED]@' },
   { name: 'env_assignment', pattern: /\b([A-Z_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z_]*)\s*=\s*("[^"]*"|'[^']*'|\S+)/g, replacement: '$1=[REDACTED]' },
   // `--password=SECRET` / `--password SECRET`, on any command: the long form
   // means one thing everywhere, so it needs no anchor.
@@ -63,7 +70,7 @@ export const BUILTIN_RULES: RedactionRule[] = [
   // long forms mean one thing on every CLI that has them.
   {
     name: 'secret_flag',
-    pattern: /(--(?:token|api-key|apikey|secret|auth-token|access-token)[= ])(?!\s)(?!\[REDACTED)("[^"]*"|'[^']*'|\S+)/g,
+    pattern: /(--(?:token|api-key|apikey|(?:\w+-)?secret(?:-key)?|auth-token|access-token)[= ])(?!\s)(?!\[REDACTED)("[^"]*"|'[^']*'|\S+)/g,
     replacement: '$1[REDACTED]',
   },
   // `curl -u user:pass` — the credential is the whole `user:pass` word.
@@ -75,10 +82,12 @@ export const BUILTIN_RULES: RedactionRule[] = [
   // `key=value`, `key: value`, `?access_token=…&` and JSON `"apiKey": "…"`,
   // any case, where the key ENDS in a secret-ish word. Ending, not containing:
   // `max_tokens: 4096` and `token_count=3` are telemetry, not credentials. The
-  // lookbehind admits one start per key, keeping the scan linear.
+  // lookbehind admits one start per key, keeping the scan linear. Quotes may be
+  // backslash-escaped (JSON inside a shell string: `-d "{\"password\":\"x\"}"`),
+  // and a quoted value may itself contain escapes.
   {
     name: 'secret_assignment',
-    pattern: /(?<![A-Za-z0-9_.-])((["']?)[A-Za-z0-9_.-]*?(?:secret|token|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key)\2\s*[:=]\s*)(?!\[REDACTED)("[^"]*"|'[^']*'|[^\s&,;"'}\]]+)/gi,
+    pattern: /(?<![A-Za-z0-9_.-])((\\?["']?)[A-Za-z0-9_.-]*?(?:secret|token|passw(?:or)?d|pwd|api[_-]?key|access[_-]?key|private[_-]?key|secret[_-]?key)\2\s*[:=]\s*)(?!\[REDACTED)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s&,;"'}\]]+)/gi,
     replacement: '$1[REDACTED]',
   },
   // `pass` and `auth` are ordinary words ("first pass: …"), so as a bare key
@@ -86,7 +95,7 @@ export const BUILTIN_RULES: RedactionRule[] = [
   // Segment-delimited, so `passthrough=1` and `--author=x` are left alone.
   {
     name: 'secret_assignment',
-    pattern: /(?<![A-Za-z0-9_.-])((?:[A-Za-z0-9]+[_.-])*(?:pass|auth)\s*=\s*|"(?:[A-Za-z0-9]+[_.-])*(?:pass|auth)"\s*:\s*)(?!\[REDACTED)("[^"]*"|'[^']*'|[^\s&,;"'}\]]+)/gi,
+    pattern: /(?<![A-Za-z0-9_.-])((?:[A-Za-z0-9]+[_.-])*(?:pass|auth)\s*=\s*|\\?"(?:[A-Za-z0-9]+[_.-])*(?:pass|auth)\\?"\s*:\s*)(?!\[REDACTED)(\\"(?:[^"\\]|\\[^"])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|[^\s&,;"'}\]]+)/gi,
     replacement: '$1[REDACTED]',
   },
   { name: 'generic_hex_secret', pattern: /\b[a-f0-9]{40,}\b/g, replacement: '[REDACTED:hex]' },
@@ -152,11 +161,15 @@ const NESTED_QUANTIFIER =
 const BACKREFERENCE = /\\[1-9]|\\k</;
 
 /**
- * Unbounded quantifiers (`*`, `+`, `{n,}`) outside character classes. Past two,
- * backtracking goes polynomial even without nesting: `[a-z]*[a-z]*[a-z]*…Z`
- * passes the nested-quantifier check and is still O(n^k) on a miss.
+ * Unbounded quantifiers (`*`, `+`, `{n,}`, and `{n,m}` with m >= 100) outside
+ * character classes. Two in a row already go quadratic without nesting:
+ * `.*.*Z` passes the nested-quantifier check and is O(n^2) on a miss.
+ * ponytail: a counting heuristic, not a proof — one unbounded quantifier per
+ * pattern, plus the nested-quantifier and backreference rejections. The
+ * upgrade path is running org rules in a worker thread with a timeout.
  */
-const MAX_UNBOUNDED_QUANTIFIERS = 2;
+const MAX_UNBOUNDED_QUANTIFIERS = 1;
+const LARGE_INTERVAL = 100;
 
 function unboundedQuantifiers(source: string): number {
   let count = 0;
@@ -173,7 +186,10 @@ function unboundedQuantifiers(source: string): number {
     }
     if (ch === '[') inClass = true;
     else if (ch === '*' || ch === '+') count += 1;
-    else if (ch === '{' && /^\{\d+,\}/.test(source.slice(i))) count += 1;
+    else if (ch === '{') {
+      const interval = /^\{\d+,(\d*)\}/.exec(source.slice(i));
+      if (interval && (interval[1] === '' || Number(interval[1]) >= LARGE_INTERVAL)) count += 1;
+    }
   }
   return count;
 }
@@ -233,7 +249,8 @@ const COMMAND_WRAPPERS = new Set(['sudo', 'env', 'command', 'nohup', 'time']);
  */
 export function commandName(commandLine: string): string {
   let afterWrapper = false;
-  for (const word of commandLine.trim().split(/\s+/)) {
+  // Quote-aware words, so `PASSWORD="my pass phrase" mysql` is one assignment.
+  for (const [word] of commandLine.matchAll(/(?:"[^"]*"|'[^']*'|[^\s"']+)+/g)) {
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
     if (afterWrapper && word.startsWith('-')) continue;
     const base = word.split('/').pop() ?? word;

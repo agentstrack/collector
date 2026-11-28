@@ -236,12 +236,12 @@ describe('broader secret patterns', () => {
 });
 
 describe('compileRules — polynomial backtracking', () => {
-  it('rejects more than two unbounded quantifiers, keeps a normal rule, reports the index only', () => {
+  it('allows one unbounded quantifier, keeps a normal rule, reports the index only', () => {
     const skipped: string[] = [];
     const rules = compileRules(
       [
         { pattern: '[a-z]*[a-z]*[a-z]*[a-z]*[a-z]*Z', replacement: 'x' },
-        { pattern: 'ACME-[0-9]{4,}-[A-Z]+', replacement: '[ACME]' },
+        { pattern: 'ACME-[0-9]{4,}-[A-Z]{2}', replacement: '[ACME]' },
         { pattern: 'a{2,}b{3,}c+', replacement: 'x' },
         { pattern: '[*+]{2}\\*\\+x', replacement: 'y' },
       ],
@@ -252,5 +252,104 @@ describe('compileRules — polynomial backtracking', () => {
       'org redaction rule #0 skipped: too many unbounded quantifiers',
       'org redaction rule #2 skipped: too many unbounded quantifiers',
     ]);
+  });
+
+  it('rejects two unbounded quantifiers, counting a large {n,m} as unbounded', () => {
+    for (const pattern of ['[a-z]*[a-z]*Z', '.*.*Z', 'a{1,}a{1,}Z', '(?:a+)(?:a+)Z', '.{0,4000}.{0,4000}Z']) {
+      expect(compileRules([{ pattern, replacement: 'x' }]), pattern).toEqual([]);
+    }
+    for (const pattern of ['ACME-[0-9]{6}', 'secret_[a-z0-9]+', 'x.{0,99}.{0,99}y+']) {
+      expect(compileRules([{ pattern, replacement: 'x' }]), pattern).toHaveLength(1);
+    }
+    // Still rejected for nesting even with a single outer quantifier.
+    expect(compileRules([{ pattern: '(a+)+', replacement: 'x' }])).toEqual([]);
+  });
+});
+
+describe('prefixed tokens inside identifiers', () => {
+  const tokens: [string, string][] = [
+    ['aws_access_key', 'AKIAIOSFODNN7EXAMPLE'],
+    ['google_api_key', `AIza${'B'.repeat(35)}`],
+    ['google_oauth_token', `ya29.${'a0Ab'.repeat(10)}`],
+    ['npm_token', `npm_${'a1B2'.repeat(9)}`],
+    ['gitlab_token', `glpat-${'x'.repeat(20)}`],
+    ['huggingface_token', `hf_${'Ab3'.repeat(12)}`],
+    ['sendgrid_key', `SG.${'a'.repeat(22)}.${'b'.repeat(43)}`],
+    ['agentstrack_key', `at_live_${'a'.repeat(16)}_${'z'.repeat(30)}`],
+    ['jwt', `eyJ${'a'.repeat(12)}.${'b'.repeat(12)}.${'c'.repeat(12)}`],
+  ];
+  for (const [kind, token] of tokens) {
+    it(`${kind} in an MCP tool name and a snake_case identifier`, () => {
+      for (const input of [`mcp__${token}__get`, `x_${token}`, `srv_${token}_y`]) {
+        const out = redact(input);
+        expect(out.text, input).not.toContain(token);
+        expect(out.redactions, input).toContain(kind);
+      }
+    });
+  }
+
+  it('still leaves a token-like run inside a longer alphanumeric word alone', () => {
+    expect(redact(`xAKIAIOSFODNN7EXAMPLE`).redactions).not.toContain('aws_access_key');
+    expect(redact(`foonpm_${'a'.repeat(36)}`).redactions).not.toContain('npm_token');
+  });
+});
+
+describe('secret patterns — escaped JSON, more keys, flags and headers', () => {
+  const cases: [string, string][] = [
+    ['secret_assignment', 'curl -d "{\\"password\\":\\"hunter2\\"}" https://x.example'],
+    ['secret_assignment', '{\\"token\\":\\"hunter2\\"}'],
+    ['secret_assignment', '{\\"auth\\":\\"hunter2\\"}'],
+    ['secret_assignment', '{"password":"hun\\"hunter2"}'],
+    ['secret_assignment', 'secret_key=hunter2'],
+    ['secret_assignment', 'secretKey: hunter2'],
+    ['secret_assignment', 'pwd=hunter2'],
+    ['secret_flag', 'app --client-secret hunter2'],
+    ['secret_flag', 'app --secret-key=hunter2'],
+    ['token_auth_header', 'curl -H "Authorization: Token hunter2" https://x.example'],
+    ['cookie_header', 'curl -H "Cookie: sid=hunter2; theme=dark" https://x.example'],
+    ['cookie_header', 'Set-Cookie: sid=hunter2; Path=/; HttpOnly'],
+  ];
+  for (const [kind, input] of cases) {
+    it(`${kind}: ${input}`, () => {
+      const out = redact(input);
+      expect(out.redactions).toContain(kind);
+      expect(out.text).not.toContain('hunter2');
+    });
+  }
+
+  it('redacts the whole cookie header, not just the first pair', () => {
+    expect(redact('Cookie: a=1; b=2').text).toBe('Cookie: [REDACTED]');
+  });
+
+  it('keeps the no-false-positive cases', () => {
+    for (const text of ['git log --author=alice', 'npm run passthrough=1', 'max_tokens: 4096', 'token_count=3', 'git checkout feature/token-refresh']) {
+      expect(redact(text).text, text).toBe(text);
+    }
+  });
+
+  it('stays linear on adversarial 100k inputs', () => {
+    const inputs = [
+      'password="' + 'a'.repeat(100_000),
+      '\\"password\\":\\"' + '\\a'.repeat(50_000),
+      'token:"'.repeat(15_000),
+      '\\"'.repeat(50_000),
+      'cookie:' + ' '.repeat(100_000),
+      'Authorization: token '.repeat(5_000),
+      '--x-'.repeat(25_000) + 'secret',
+      'a.'.repeat(50_000) + '=',
+      'auth="' + '\\'.repeat(100_000),
+    ];
+    for (const input of inputs) {
+      const started = performance.now();
+      redact(input);
+      expect(performance.now() - started, input.slice(0, 12)).toBeLessThan(500);
+    }
+  });
+});
+
+describe('commandName — quoted assignments', () => {
+  it('skips a NAME="quoted value" assignment as one word', () => {
+    expect(commandName('PASSWORD="my pass phrase" mysql -h x')).toBe('mysql');
+    expect(commandName("A='x y' B=2 env -i make")).toBe('make');
   });
 });
