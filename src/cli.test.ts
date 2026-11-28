@@ -147,19 +147,40 @@ describe('cli', () => {
     expect(received).toHaveLength(shown);
   });
 
-  it('plain sync leaves scanning to a running collector', async () => {
+  it('plain sync leaves scanning and uploading to a running collector', async () => {
     const received: unknown[] = [];
     const port = await configServer(received);
     const dir = home(`${LOGGED_IN}api_url: http://127.0.0.1:${port}\ntracking:\n  agents: [codex]\n  git_metadata: false\n`);
     codexHome(dir);
+    // Something already queued, which the daemon is (or will be) flushing itself.
+    const { Spool } = await import('./queue/spool.js');
+    const spool = new Spool(join(dir, '.agentstrack', 'spool.db'));
+    spool.enqueue([{
+      event_id: '00000000-0000-4000-8000-0000000000e1', schema_version: '1', occurred_at: new Date().toISOString(),
+      collector_id: '00000000-0000-4000-8000-000000000000', session_id: 's1', agent: 'codex', event_type: 'heartbeat', payload: {},
+    } as never]);
+    spool.close();
     // This test process stands in for a live daemon holding the pid file.
     writeFileSync(join(dir, '.agentstrack', 'collector.pid'), String(process.pid));
 
     const { out, code } = await cli(dir, 'sync');
     expect(code).toBe(0);
-    expect(out).toContain('running collector reads new transcript lines itself');
-    expect(out).toContain('Queue is already empty');
+    expect(out).toContain('running collector reads and uploads new events itself');
     expect(received).toHaveLength(0);
+  });
+
+  it('sync --dry-run on a registered device that has never reached the server says so and exits 1', async () => {
+    // A port nothing listens on: the config fetch fails at once.
+    const port = await configServer();
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = undefined;
+    const dir = home(`${LOGGED_IN}api_url: http://127.0.0.1:${port}\ntracking:\n  agents: [codex]\n  git_metadata: false\n`);
+    codexHome(dir);
+
+    const { out, code } = await cli(dir, 'sync', '--dry-run');
+    expect(code).toBe(1);
+    expect(out).toContain('Org policy not fetched yet');
+    expect(out).not.toContain('nothing would be sent');
   });
 
   it('doctor passes with one agent installed and another simply absent, without creating a spool', async () => {

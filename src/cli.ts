@@ -503,6 +503,7 @@ program
       process.once('SIGINT', onSignal);
       process.once('SIGTERM', onSignal);
       let pending: ReturnType<Spool['peek']>;
+      let held = false;
       try {
         const copy = join(dir, 'spool.db');
         if (existsSync(SPOOL_PATH)) {
@@ -516,12 +517,21 @@ program
         const spool = new Spool(copy);
         const collector = new Collector(config, { spool, dryRun: true });
         await collector.scanOnce();
+        held = !collector.orgPolicyKnown();
         pending = spool.peek(Number.MAX_SAFE_INTEGER);
         collector.stop();
       } finally {
         process.off('SIGINT', onSignal);
         process.off('SIGTERM', onSignal);
         rmSync(dir, { recursive: true, force: true });
+      }
+      if (held) {
+        console.error(
+          pc.yellow('!') +
+            " Org policy not fetched yet — can't preview until the server is reachable; nothing is collected until then.",
+        );
+        process.exitCode = 1;
+        return;
       }
       if (pending.length === 0) {
         console.log(pc.green('✓') + ' Nothing queued and nothing new in transcripts — nothing would be sent.');
@@ -561,21 +571,22 @@ program
       );
     }
 
+    // A plain sync leaves everything to a running collector. Each process
+    // keeps its own checkpoint cache and per-file adapter state (Codex billing
+    // mode, session ids), so a second reader resuming mid-file can emit
+    // different events; and both flushing the same queue peek the same rows,
+    // so every in-flight event would be uploaded twice.
+    if (!options.full && isRunning()) {
+      console.log(pc.dim('The running collector reads and uploads new events itself — nothing for sync to do.'));
+      return;
+    }
     const collector = new Collector(config);
     // Scan first, as one daemon pass would, so `sync` sends what
     // `sync --dry-run` showed — on a fresh install the queue is empty until
     // something has read the transcripts. A --full sync has to scan regardless:
     // with the checkpoints gone there is nothing queued yet.
-    // A plain sync does not scan while a collector is running. Each process
-    // keeps its own checkpoint cache and per-file adapter state (Codex billing
-    // mode, session ids), so a second reader resuming mid-file can emit
-    // different events, and the daemon would re-read what this one sent.
-    if (options.full || !isRunning()) {
-      console.log('Scanning transcripts…');
-      await collector.scanOnce();
-    } else {
-      console.log(pc.dim('The running collector reads new transcript lines itself; uploading what is already queued.'));
-    }
+    console.log('Scanning transcripts…');
+    await collector.scanOnce();
     const before = collector.queueDepth();
     if (before === 0) {
       console.log(pc.green('✓') + ' Queue is already empty.');
@@ -583,7 +594,7 @@ program
       return;
     }
     console.log(`Uploading ${before} queued events…`);
-    await collector.flush();
+    await collector.drain();
     const after = collector.queueDepth();
     const paused = collector.uploadState().paused;
     collector.stop();
