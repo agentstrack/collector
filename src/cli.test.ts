@@ -183,6 +183,19 @@ describe('cli', () => {
     expect(out).not.toContain('nothing would be sent');
   });
 
+  it('plain sync on a registered device that has never reached the server says so and exits 1', async () => {
+    const port = await configServer();
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = undefined;
+    const dir = home(`${LOGGED_IN}api_url: http://127.0.0.1:${port}\ntracking:\n  agents: [codex]\n  git_metadata: false\n`);
+    codexHome(dir);
+
+    const { out, code } = await cli(dir, 'sync');
+    expect(code).toBe(1);
+    expect(out).toContain('Org policy not fetched yet');
+    expect(out).not.toContain('Queue is already empty');
+  });
+
   it('doctor passes with one agent installed and another simply absent, without creating a spool', async () => {
     const port = await configServer();
     const dir = home(`${LOGGED_IN}api_url: http://127.0.0.1:${port}\ntracking:\n  agents: [claude_code, codex]\n`);

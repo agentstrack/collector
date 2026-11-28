@@ -587,6 +587,15 @@ program
     // with the checkpoints gone there is nothing queued yet.
     console.log('Scanning transcripts…');
     await collector.scanOnce();
+    if (config.collector_id && !collector.orgPolicyKnown()) {
+      console.error(
+        pc.yellow('!') +
+          " Org policy not fetched yet — the server isn't reachable, so nothing was read or uploaded. Try again once it is.",
+      );
+      collector.stop();
+      process.exitCode = 1;
+      return;
+    }
     const before = collector.queueDepth();
     if (before === 0) {
       console.log(pc.green('✓') + ' Queue is already empty.');
