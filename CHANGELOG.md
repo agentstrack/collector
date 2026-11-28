@@ -32,7 +32,9 @@ exits 0 when the device is not configured.
 - **`git.branch_changed` is emitted.** When a repository's branch differs from the last branch this
   collector process read for it, a `git.branch_changed` event with `{ from, to }` (and the usual
   `repo` context) is queued right after the event that revealed it. The first read of a repository
-  after a start is never a change, so a restart does not look like a checkout. Requires
+  after a start is never a change, so a restart does not look like a checkout, and an event older
+  than the last one seen for that repository neither emits nor moves the remembered branch, so a
+  backfill does not emit transitions stamped in the past. Requires
   `tracking.git_metadata` (the default) and an adapter that reports a working directory. Branch
   names are secret-redacted like every other label.
 - **`MultiEdit` produces `file.changed`.** One event per call, with `lines_added` / `lines_removed`
@@ -76,16 +78,20 @@ exits 0 when the device is not configured.
   the list is empty.
 - **Plain `sync` scans before uploading when no collector is running**, so it sends what
   `sync --dry-run` showed; on a fresh install the queue is empty until something has read the
-  transcripts. When a collector is running (its pidfile is live), `sync` only uploads what is queued
-  and says the running collector reads new lines itself — two readers of the same files would each
-  resume from their own checkpoints.
+  transcripts. When a collector is running (its pidfile is live), plain `sync` neither scans nor
+  uploads and says the running collector does both — two readers of the same files would each
+  resume from their own checkpoints, and two uploaders of the same queue would send every in-flight
+  event twice. `sync --full` still scans and uploads.
 - **`sync --dry-run` scans transcripts.** It used to list only the head of the queue, up to
   `upload.batch_size` events, so new transcript lines and anything past the first batch were not
   shown. It now copies the spool to a temporary directory, runs one scan against the copy, and lists
   every event that copy holds: what is queued plus what the next scan would add. No event is
   uploaded, no read checkpoint or queue row is written to the real spool, and the copy is deleted
   afterwards, including on Ctrl-C. It does contact the server for the org policy, and writes no scan
-  counts to the log. `--full` with `--dry-run` is still ignored, with a notice.
+  counts to the log. `--full` with `--dry-run` is still ignored, with a notice. On a registered
+  device that has never fetched its org policy and cannot reach the server, it says
+  `Org policy not fetched yet — can't preview …` and exits 1 instead of claiming nothing would be
+  sent.
 - **`status` and `status --json` exit 0 when the device is not configured.** `configured` and
   `logged_in` (or the `Not configured` line) carry that state. `status --json` used to exit 1.
 - `summary --days` must be a whole number from 1 to 30; anything else exits 2 instead of being
@@ -103,6 +109,9 @@ exits 0 when the device is not configured.
   the end of `sync --full` emitted `session.ended` (`reason: unknown`) for every open session,
   cutting it short. Sessions now end only on the idle timeout. The idle check is also skipped while a
   backfill is still reading a file, so a session is not ended at the point the read has reached.
+  The open sessions are stored in the spool (`open_sessions` meta key, entries older than 7 days
+  dropped), so a session that went quiet before a restart, an auto-update or a one-shot `sync` is
+  ended by whichever collector process runs next.
 - **Codex: live token usage is no longer counted twice.** A live rollout could be gauged from its
   `token_count` totals before its first `token_usage_record` appeared, and then billed per record as
   well. A file is now billed per record from the first record seen, with no version cutoff.
@@ -110,7 +119,11 @@ exits 0 when the device is not configured.
   line's `session_meta`, so `excluded_projects` and repository context apply before the next
   `turn_context`.
 - **A 400 or 422 on a multi-event batch no longer strikes every event in it.** The batch is halved
-  and retried, as a `413` already was, until the bad event is alone and only it is struck.
+  and retried, as a `413` already was, until the bad event is alone and only it is struck. A one-shot
+  `sync` keeps halving within the same run, so the good events are delivered before it exits.
+- Skipped org redaction rules are numbered by their index in the server's list, so `#N` matches the
+  rule the admin configured; a malformed element is logged as `org redaction rule #N skipped:
+  malformed` instead of being dropped silently and shifting every later number.
 - A stale `Uploads: paused` recorded by an earlier process is cleared on the next upload pass that
   is not itself paused, so `status` stops reporting a pause that no longer applies.
 - `status` and `doctor` no longer create `spool.db` when it does not exist.
