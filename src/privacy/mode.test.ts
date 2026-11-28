@@ -33,3 +33,12 @@ describe('clampPrivacyMode — org policy is a ceiling, not a floor', () => {
     }
   });
 });
+
+describe('clampPrivacyMode — an unreadable ceiling', () => {
+  it('resolves to metadata, never loosening', () => {
+    for (const org of [undefined, '', 'everything', 'FULL', 'toString']) {
+      expect(clampPrivacyMode('full', org)).toBe('metadata');
+      expect(clampPrivacyMode('analytics', org)).toBe('metadata');
+    }
+  });
+});

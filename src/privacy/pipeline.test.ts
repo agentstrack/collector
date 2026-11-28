@@ -346,3 +346,45 @@ describe('privacy pipeline — secret exposure tally', () => {
     expect(event.payload).not.toHaveProperty('secrets_redacted');
   });
 });
+
+describe('privacy pipeline — labels that travel in every mode', () => {
+  const CANARY = 'ghp_' + 'Z9'.repeat(18);
+  const withPayload = (payload: Record<string, unknown>): EventEnvelope => ({ ...promptEvent(), payload });
+
+  it('a token in any label or repo field never survives, in any mode', () => {
+    const labels = [
+      'workflow_name', 'skill', 'subagent_type', 'agent_type', 'agent_kind', 'agent_id', 'tool_name',
+      'abort_reason', 'stop_reason', 'error_kind', 'model', 'plan_type', 'branch', 'project_name', 'from', 'to',
+    ];
+    for (const mode of ['metadata', 'analytics', 'full'] as const) {
+      for (const key of labels) {
+        const { event } = applyPrivacy(withPayload({ [key]: `x-${CANARY}` }), { config: config(mode) });
+        expect(JSON.stringify(event), `${mode}/${key}`).not.toContain(CANARY);
+        expect(event.payload['secrets_redacted'], `${mode}/${key}`).toEqual([{ kind: 'github_token', count: 1 }]);
+      }
+      const { event } = applyPrivacy(
+        withPayload({ repo: { branch: `feat/${CANARY}`, project_name: `p-${CANARY}`, project_path: '/u/app' } }),
+        { config: config(mode) },
+      );
+      expect(JSON.stringify(event), `${mode}/repo`).not.toContain(CANARY);
+    }
+  });
+
+  it('cuts an error message only after redaction, so a straddling secret is not shipped as a fragment', () => {
+    const message = 'x'.repeat(990) + CANARY + ' tail';
+    for (const mode of ['analytics', 'full'] as const) {
+      const { event } = applyPrivacy(withPayload({ error_kind: 'error', message }), { config: config(mode) });
+      const out = event.payload['message'] as string;
+      expect(out.length, mode).toBeLessThanOrEqual(1000);
+      expect(out, mode).not.toContain('ghp_');
+      expect(out, mode).toContain('[REDACTED');
+    }
+  });
+
+  it('shell_arguments: never keeps the binary past env assignments and wrappers', () => {
+    const { event } = applyPrivacy(withPayload({ command: 'API_TOKEN=abc sudo /usr/bin/make deploy' }), {
+      config: config('full', { shell_arguments: 'never' }),
+    });
+    expect(event.payload['command']).toBe('make');
+  });
+});

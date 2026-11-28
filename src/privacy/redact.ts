@@ -33,10 +33,16 @@ export const BUILTIN_RULES: RedactionRule[] = [
   { name: 'stripe_key', pattern: /[rs]k_(?:live|test)_[A-Za-z0-9]{16,}/g, replacement: '[REDACTED:stripe_key]' },
   { name: 'aws_access_key', pattern: /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, replacement: '[REDACTED:aws_access_key]' },
   { name: 'google_api_key', pattern: /\bAIza[A-Za-z0-9_-]{35}\b/g, replacement: '[REDACTED:google_api_key]' },
+  { name: 'google_oauth_token', pattern: /\bya29\.[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:google_oauth_token]' },
+  { name: 'npm_token', pattern: /\bnpm_[A-Za-z0-9]{36}\b/g, replacement: '[REDACTED:npm_token]' },
+  { name: 'gitlab_token', pattern: /\bglpat-[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:gitlab_token]' },
+  { name: 'huggingface_token', pattern: /\bhf_[A-Za-z0-9]{30,}\b/g, replacement: '[REDACTED:huggingface_token]' },
+  { name: 'sendgrid_key', pattern: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g, replacement: '[REDACTED:sendgrid_key]' },
   { name: 'agentstrack_key', pattern: /\bat_(?:live|test)_[a-f0-9]{16}_[A-Za-z0-9_-]{20,}/g, replacement: '[REDACTED:agentstrack_key]' },
   { name: 'private_key', pattern: /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----/g, replacement: '[REDACTED:private_key]' },
   { name: 'jwt', pattern: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, replacement: '[REDACTED:jwt]' },
   { name: 'bearer_header', pattern: /\b[Bb]earer\s+[A-Za-z0-9._~+/-]{20,}=*/g, replacement: 'Bearer [REDACTED]' },
+  { name: 'basic_auth_header', pattern: /\b(authorization:\s*basic\s+)[A-Za-z0-9+/]{8,}=*/gi, replacement: '$1[REDACTED]' },
   { name: 'basic_auth_url', pattern: /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/g, replacement: '$1[REDACTED]@' },
   { name: 'env_assignment', pattern: /\b([A-Z_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|APIKEY|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Z_]*)\s*=\s*("[^"]*"|'[^']*'|\S+)/g, replacement: '$1=[REDACTED]' },
   // `--password=SECRET` / `--password SECRET`, on any command: the long form
@@ -51,6 +57,36 @@ export const BUILTIN_RULES: RedactionRule[] = [
   {
     name: 'inline_password_flag',
     pattern: /((?:^|[|;&]\s*|\s)(?:mysql|mysqladmin|mysqldump|mysqlshow|mariadb|mariadb-dump|mongo|mongosh|sshpass|smbclient)\b[^\n|;&]*?(?<![\w-])-p)(?!\s)("[^"]*"|'[^']*'|\S+)/g,
+    replacement: '$1[REDACTED]',
+  },
+  // `--token VALUE` / `--api-key=VALUE` and friends: like `--password`, the
+  // long forms mean one thing on every CLI that has them.
+  {
+    name: 'secret_flag',
+    pattern: /(--(?:token|api-key|apikey|secret|auth-token|access-token)[= ])(?!\s)(?!\[REDACTED)("[^"]*"|'[^']*'|\S+)/g,
+    replacement: '$1[REDACTED]',
+  },
+  // `curl -u user:pass` — the credential is the whole `user:pass` word.
+  {
+    name: 'curl_user',
+    pattern: /(\bcurl\b[^\n|;&]*?\s(?:-u|--user)[= ]?\s*)("[^"]*"|'[^']*'|[^\s:'"]+:\S+)/g,
+    replacement: '$1[REDACTED]',
+  },
+  // `key=value`, `key: value`, `?access_token=…&` and JSON `"apiKey": "…"`,
+  // any case, where the key ENDS in a secret-ish word. Ending, not containing:
+  // `max_tokens: 4096` and `token_count=3` are telemetry, not credentials. The
+  // lookbehind admits one start per key, keeping the scan linear.
+  {
+    name: 'secret_assignment',
+    pattern: /(?<![A-Za-z0-9_.-])((["']?)[A-Za-z0-9_.-]*?(?:secret|token|passw(?:or)?d|api[_-]?key|access[_-]?key|private[_-]?key)\2\s*[:=]\s*)(?!\[REDACTED)("[^"]*"|'[^']*'|[^\s&,;"'}\]]+)/gi,
+    replacement: '$1[REDACTED]',
+  },
+  // `pass` and `auth` are ordinary words ("first pass: …"), so as a bare key
+  // they count only with `=` (env, query string, flag) or as a quoted JSON key.
+  // Segment-delimited, so `passthrough=1` and `--author=x` are left alone.
+  {
+    name: 'secret_assignment',
+    pattern: /(?<![A-Za-z0-9_.-])((?:[A-Za-z0-9]+[_.-])*(?:pass|auth)\s*=\s*|"(?:[A-Za-z0-9]+[_.-])*(?:pass|auth)"\s*:\s*)(?!\[REDACTED)("[^"]*"|'[^']*'|[^\s&,;"'}\]]+)/gi,
     replacement: '$1[REDACTED]',
   },
   { name: 'generic_hex_secret', pattern: /\b[a-f0-9]{40,}\b/g, replacement: '[REDACTED:hex]' },
@@ -115,19 +151,57 @@ const NESTED_QUANTIFIER =
   /\((?:[^()]|\([^()]*\))*(?:[+*?|{]|\([^()]*[+*?|{][^()]*\))(?:[^()]|\([^()]*\))*\)[+*?{]/;
 const BACKREFERENCE = /\\[1-9]|\\k</;
 
-/** Compiles org-supplied patterns, skipping any unsafe or malformed rule. */
+/**
+ * Unbounded quantifiers (`*`, `+`, `{n,}`) outside character classes. Past two,
+ * backtracking goes polynomial even without nesting: `[a-z]*[a-z]*[a-z]*…Z`
+ * passes the nested-quantifier check and is still O(n^k) on a miss.
+ */
+const MAX_UNBOUNDED_QUANTIFIERS = 2;
+
+function unboundedQuantifiers(source: string): number {
+  let count = 0;
+  let inClass = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '\\') {
+      i += 1;
+      continue;
+    }
+    if (inClass) {
+      if (ch === ']') inClass = false;
+      continue;
+    }
+    if (ch === '[') inClass = true;
+    else if (ch === '*' || ch === '+') count += 1;
+    else if (ch === '{' && /^\{\d+,\}/.test(source.slice(i))) count += 1;
+  }
+  return count;
+}
+
+function unsafeReason(pattern: string): string | null {
+  if (pattern.length > MAX_ORG_PATTERN_LENGTH) return 'too long';
+  if (NESTED_QUANTIFIER.test(pattern)) return 'nested quantifier';
+  if (BACKREFERENCE.test(pattern)) return 'backreference';
+  if (unboundedQuantifiers(pattern) > MAX_UNBOUNDED_QUANTIFIERS) return 'too many unbounded quantifiers';
+  return null;
+}
+
+/**
+ * Compiles org-supplied patterns, skipping any unsafe or malformed rule.
+ *
+ * `onSkip` hears the rule's index and the reason, never the pattern: it is org
+ * config, not user content, but there is no reason to echo it into a log.
+ */
 export function compileRules(
   rules: { pattern: string; replacement: string }[],
+  onSkip: (message: string) => void = () => {},
 ): RedactionRule[] {
   const compiled: RedactionRule[] = [];
   for (const [index, rule] of rules.entries()) {
-    if (
-      rule.pattern.length > MAX_ORG_PATTERN_LENGTH ||
-      NESTED_QUANTIFIER.test(rule.pattern) ||
-      BACKREFERENCE.test(rule.pattern)
-    ) {
-      // Same policy as a malformed rule: log-and-skip rather than stop the
-      // collector. (Logging happens at the call site, which holds the logger.)
+    const unsafe = unsafeReason(rule.pattern);
+    if (unsafe) {
+      // Same policy as a malformed rule: skip rather than stop the collector.
+      onSkip(`org redaction rule #${index} skipped: ${unsafe}`);
       continue;
     }
     try {
@@ -139,13 +213,35 @@ export function compileRules(
       });
     } catch {
       // A malformed server-side rule must not stop the collector entirely.
+      onSkip(`org redaction rule #${index} skipped: invalid regex`);
     }
   }
   return compiled;
 }
 
-/** Extracts the binary name, dropping arguments that may hold secrets. */
+/** Prefixes that run the next word as the real command. */
+const COMMAND_WRAPPERS = new Set(['sudo', 'env', 'command', 'nohup', 'time']);
+
+/**
+ * Extracts the binary name, dropping arguments that may hold secrets.
+ *
+ * Leading `NAME=value` assignments and wrapper commands are skipped, or
+ * `API_TOKEN=abc npm test` ships the token as the "binary". Flags directly
+ * after a wrapper are skipped too (`env -i`, `sudo -E`).
+ * ponytail: a wrapper flag that takes a value (`sudo -u root ls`) yields the
+ * value; parse per-wrapper arity if that ever shows up in the data.
+ */
 export function commandName(commandLine: string): string {
-  const first = commandLine.trim().split(/\s+/)[0] ?? '';
-  return first.split('/').pop() ?? first;
+  let afterWrapper = false;
+  for (const word of commandLine.trim().split(/\s+/)) {
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue;
+    if (afterWrapper && word.startsWith('-')) continue;
+    const base = word.split('/').pop() ?? word;
+    if (COMMAND_WRAPPERS.has(base)) {
+      afterWrapper = true;
+      continue;
+    }
+    return base;
+  }
+  return '';
 }

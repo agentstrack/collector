@@ -167,3 +167,90 @@ describe('inline password flags', () => {
     }
   });
 });
+
+describe('commandName — wrappers and leading assignments', () => {
+  it('skips NAME=value tokens, wrapper commands and their flags', () => {
+    expect(commandName('API_TOKEN=abc npm test')).toBe('npm');
+    expect(commandName('FOO=x /Users/x/bin/deploy')).toBe('deploy');
+    expect(commandName('  ls')).toBe('ls');
+    expect(commandName('sudo -E env -i PATH=/bin nohup time /usr/bin/make all')).toBe('make');
+    expect(commandName('A=1 B=2')).toBe('');
+    expect(commandName('   ')).toBe('');
+  });
+});
+
+describe('broader secret patterns', () => {
+  const cases: [string, string][] = [
+    ['npm_token', `//registry.npmjs.org/:_authToken npm_${'a1B2'.repeat(9)}`],
+    ['gitlab_token', `glpat-${'x'.repeat(20)}`],
+    ['huggingface_token', `hf_${'Ab3'.repeat(12)}`],
+    ['sendgrid_key', `SG.${'a'.repeat(22)}.${'b'.repeat(43)}`],
+    ['google_oauth_token', `ya29.${'a0Ab'.repeat(10)}`],
+    ['basic_auth_header', 'curl -H "Authorization: Basic dXNlcjpwYXNzd29yZA=="'],
+    ['secret_assignment', "curl -H 'X-Api-Key: k3y-v4lue-123'"],
+    ['secret_assignment', 'db_password=hunter2'],
+    ['secret_assignment', 'aws_secret_access_key = wJalrXUtnFEMIK7MDENG'],
+    ['secret_assignment', 'GET /cb?access_token=abc123&state=1'],
+    ['secret_assignment', '{"password":"hunter2","user":"x"}'],
+    ['secret_assignment', '{"apiKey": "k-123456"}'],
+    ['secret_assignment', 'clientSecret: s3cr3tvalue'],
+    ['secret_assignment', 'DB_PASS=hunter2'],
+    ['secret_assignment', 'https://x.example/login?user=a&pass=hunter2'],
+    ['secret_assignment', '{"auth":"hunter2"}'],
+    ['secret_flag', 'gh-cli --token hunter2'],
+    ['secret_flag', 'deploy --api-key=hunter2'],
+    ['secret_flag', 'vault --secret "two words"'],
+    ['inline_password_flag', 'tool --password hunter2'],
+    ['curl_user', 'curl -u admin:hunter2 https://x.example'],
+  ];
+  const leaked = /hunter2|dXNlcjpw|k3y-v4lue|wJalrX|abc123|k-123456|s3cr3t|two words|a1B2a1B2|xxxxxxxxxx|Ab3Ab3|bbbbbbbbbb|a0Aba0Ab/;
+  for (const [kind, input] of cases) {
+    it(`${kind}: ${input}`, () => {
+      const out = redact(input);
+      expect(out.redactions).toContain(kind);
+      expect(out.text).not.toMatch(leaked);
+    });
+  }
+
+  it('leaves ordinary words and telemetry keys alone', () => {
+    for (const text of [
+      'git log --author=alice --since=1.week',
+      'npm run passthrough=1',
+      'first pass: refactor the parser',
+      'max_tokens: 4096, token_count=3, input_tokens=12',
+      'authorization header is missing',
+    ]) {
+      expect(redact(text).text, text).toBe(text);
+    }
+  });
+
+  it('treats a 40-hex SHA exactly as before (generic_hex only)', () => {
+    expect(redact('commit 3f786850e387550fdab836ed7e6dc881de23001b').redactions).toEqual(['generic_hex_secret']);
+    expect(redact('commit 3f78685').redactions).toEqual([]);
+  });
+
+  it('does not double-count a value an earlier rule already redacted', () => {
+    expect(redact('API_TOKEN=abc npm test').counts).toEqual({ env_assignment: 1 });
+    expect(redact('mytool --token=abc').counts).toEqual({ secret_flag: 1 });
+  });
+});
+
+describe('compileRules — polynomial backtracking', () => {
+  it('rejects more than two unbounded quantifiers, keeps a normal rule, reports the index only', () => {
+    const skipped: string[] = [];
+    const rules = compileRules(
+      [
+        { pattern: '[a-z]*[a-z]*[a-z]*[a-z]*[a-z]*Z', replacement: 'x' },
+        { pattern: 'ACME-[0-9]{4,}-[A-Z]+', replacement: '[ACME]' },
+        { pattern: 'a{2,}b{3,}c+', replacement: 'x' },
+        { pattern: '[*+]{2}\\*\\+x', replacement: 'y' },
+      ],
+      (message) => skipped.push(message),
+    );
+    expect(rules.map((r) => r.name)).toEqual(['org_rule_1', 'org_rule_3']);
+    expect(skipped).toEqual([
+      'org redaction rule #0 skipped: too many unbounded quantifiers',
+      'org redaction rule #2 skipped: too many unbounded quantifiers',
+    ]);
+  });
+});

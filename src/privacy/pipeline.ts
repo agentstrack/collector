@@ -33,6 +33,25 @@ export const TITLE_MAX_LENGTH = 120;
 
 const TEXT_KEYS = ['prompt_text', 'derived_title', 'message', 'command', 'description'] as const;
 
+/**
+ * Short labels that travel in EVERY mode, metadata included. They come from
+ * transcripts or the repo, not from us, so they are scanned like any other
+ * text: a branch named after a ticket can carry a token as easily as a prompt.
+ * `from`/`to` are git.branch_changed's branch names.
+ */
+const LABEL_KEYS = [
+  'workflow_name', 'skill', 'subagent_type', 'agent_type', 'agent_kind', 'agent_id', 'tool_name',
+  'abort_reason', 'stop_reason', 'error_kind', 'model', 'plan_type', 'branch', 'project_name', 'from', 'to',
+] as const;
+const REPO_LABEL_KEYS = ['branch', 'project_name'] as const;
+
+/**
+ * Lengths adapters used to cut to themselves, now applied here AFTER every
+ * rule has run: a cut before redaction can split a secret into fragments no
+ * pattern recognises, and the fragment ships.
+ */
+export const FIELD_MAX_LENGTH: Readonly<Record<string, number>> = { message: 1000, abort_reason: 50 };
+
 export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): PipelineResult {
   const mode = ctx.config.privacy.mode;
   const policy = ctx.config.privacy;
@@ -102,6 +121,28 @@ export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): Pipeli
     payload[key] = redact(value, extraRules).text;
   }
 
+  // Labels are never stripped, so they are tallied here rather than above.
+  const redactLabels = (target: Record<string, unknown>, keys: readonly string[]): void => {
+    for (const key of keys) {
+      const value = target[key];
+      if (typeof value !== 'string') continue;
+      const result = redact(value, extraRules);
+      target[key] = result.text;
+      for (const [kind, n] of Object.entries(result.counts)) counts[kind] = (counts[kind] ?? 0) + n;
+    }
+  };
+  redactLabels(payload, LABEL_KEYS);
+  if (payload['repo'] && typeof payload['repo'] === 'object' && !Array.isArray(payload['repo'])) {
+    const repo = { ...(payload['repo'] as Record<string, unknown>) };
+    redactLabels(repo, REPO_LABEL_KEYS);
+    payload['repo'] = repo;
+  }
+
+  for (const [key, max] of Object.entries(FIELD_MAX_LENGTH)) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.length > max) payload[key] = value.slice(0, max);
+  }
+
   // The title is cut to length HERE, after redaction with the org's rules and
   // not before it. deriveTitle deliberately hands over the whole line: cutting
   // earlier bisects a straddling secret into two halves that match no pattern,
@@ -157,7 +198,7 @@ export function applyPrivacy(event: EventEnvelope, ctx: PipelineContext): Pipeli
 
   // --- shell arguments ----------------------------------------------------
   if (typeof payload['command'] === 'string' && policy.shell_arguments === 'never') {
-    payload['command'] = payload['command'].split(/\s+/)[0] ?? '';
+    payload['command'] = commandName(payload['command']);
   }
 
   // --- secret tally ------------------------------------------------------
