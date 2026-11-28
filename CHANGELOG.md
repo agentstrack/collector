@@ -10,6 +10,17 @@ released as a major version, with a migration note in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-28
+
+No code changes. The published package is 0.7.0's code with new docs and metadata.
+
+### Changed
+
+- The README links [agentstrack.ai](https://agentstrack.ai), and the npm description and keywords
+  describe what the collector is for.
+- Development only: `vitest` 2.1.9 → 5.1.2, which clears the open advisories in the test toolchain.
+  Nothing in the published package depends on it.
+
 ## [0.7.0] - 2026-11-28
 
 Behaviour changes worth reading before you update: a registered device reads and uploads nothing
@@ -785,7 +796,8 @@ As released. Several of these have since been fixed — see the later sections a
      were real (0.2.0 is on npm) and their notes stay above; the compare links
      simply skip to the neighbouring tag that does exist. -->
 
-[Unreleased]: https://github.com/agentstrack/collector/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/agentstrack/collector/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/agentstrack/collector/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/agentstrack/collector/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/agentstrack/collector/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/agentstrack/collector/compare/v0.6.0...v0.6.1

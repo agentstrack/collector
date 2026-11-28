@@ -1,6 +1,6 @@
 {
   "name": "@agentstrack/collector",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Privacy-first collector for AI coding agent analytics: Claude Code, Codex, Gemini CLI and OpenCode token and cost tracking. Local-first, open source.",
   "license": "Apache-2.0",
   "type": "module",
