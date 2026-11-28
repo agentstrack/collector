@@ -1,8 +1,10 @@
 import { createRequire } from 'node:module';
 import { gzipSync } from 'node:zlib';
 import { z } from 'zod';
-import type { EventEnvelope } from '../schema.js';
+import { PRIVACY_MODES, type EventEnvelope, type PrivacyMode } from '../schema.js';
 import type { MachineInfo } from '../machine.js';
+import { isPrivacyMode } from '../privacy/mode.js';
+import { redact } from '../privacy/redact.js';
 
 /** Read from package.json so the CLI, register and health can never drift from what is published. */
 export const VERSION: string = (
@@ -40,15 +42,28 @@ export const BatchResult = z.object({
 });
 export type BatchResult = z.infer<typeof BatchResult>;
 
-export interface ServerConfig {
-  privacy_mode: 'metadata' | 'analytics' | 'full';
-  idle_timeout_seconds: number;
-  retention_days: number;
-  redaction_rules: { pattern: string; replacement: string }[];
-  max_batch_events: number;
-  batch_interval_seconds: number;
+/**
+ * `GET /v1/collector/config` is a trust boundary too, and the org ceiling and
+ * redaction rules inside it are privacy controls. Unknown fields are kept
+ * (a newer server must not break an older collector); an unreadable mode is
+ * the strictest one, never a looser default.
+ */
+export const ServerConfig = z.looseObject({
+  privacy_mode: z.enum(PRIVACY_MODES).catch('metadata'),
+  idle_timeout_seconds: z.number().optional(),
+  retention_days: z.number().optional(),
+  redaction_rules: z.array(z.object({ pattern: z.string(), replacement: z.string() })).default([]),
+  // 0 = no server cap; the daemon only applies a positive integer.
+  max_batch_events: z.number().catch(0),
+  batch_interval_seconds: z.number().optional(),
   /** Every event type the server accepts. Absent on servers older than the field. */
-  event_types?: string[];
+  event_types: z.array(z.string()).optional(),
+});
+export type ServerConfig = z.infer<typeof ServerConfig>;
+
+export function parseServerConfig(raw: unknown): ServerConfig | null {
+  const parsed = ServerConfig.safeParse(raw);
+  return parsed.success ? parsed.data : null;
 }
 
 export class ApiError extends Error {
@@ -80,12 +95,21 @@ export class ApiClient {
     /** The mode this device will actually enforce, which may be stricter than the org's. */
     privacy_mode?: string;
     agents: { agent: string; version?: string }[];
-  }): Promise<{ collector_id: string; privacy_mode: string }> {
-    return this.request('POST', '/v1/collector/register', input);
+  }): Promise<{ collector_id: string; privacy_mode: PrivacyMode | undefined }> {
+    const raw = await this.request<{ collector_id: string; privacy_mode?: unknown }>(
+      'POST',
+      '/v1/collector/register',
+      input,
+    );
+    // Validated here so no caller has to cast: an unreadable mode is
+    // undefined, which clampPrivacyMode treats as the strictest ceiling.
+    return { collector_id: raw.collector_id, privacy_mode: isPrivacyMode(raw.privacy_mode) ? raw.privacy_mode : undefined };
   }
 
   async getConfig(): Promise<ServerConfig> {
-    return this.request('GET', '/v1/collector/config');
+    const config = parseServerConfig(await this.request<unknown>('GET', '/v1/collector/config'));
+    if (!config) throw new ApiError('GET /v1/collector/config returned an unreadable response', 200, true);
+    return config;
   }
 
   async sendBatch(events: EventEnvelope[]): Promise<BatchResult> {
@@ -146,12 +170,12 @@ export class ApiClient {
       const response = await fetch(url, { method, headers, body: payload, signal: controller.signal });
 
       if (!response.ok) {
-        const text = await response.text().catch(() => '');
+        const code = errorCode(await response.text().catch(() => ''));
         // 4xx means we sent something wrong — retrying will not fix it, except
         // 408/429 which are explicitly "try again".
         const retryable = response.status >= 500 || response.status === 408 || response.status === 429;
         throw new ApiError(
-          `${method} ${path} failed: ${response.status} ${text.slice(0, 200)}`,
+          `${method} ${path} failed: ${response.status}${code ? ` ${code}` : ''}`,
           response.status,
           retryable,
           retryAfterMs(response.headers.get('retry-after-ingest') ?? response.headers.get('retry-after')),
@@ -170,6 +194,30 @@ export class ApiClient {
       clearTimeout(timeout);
     }
   }
+}
+
+/**
+ * The server's `error` code from a failure body, or '' — never the raw body.
+ * A 4xx can echo back what we sent (a rejected event, the key itself), and a
+ * proxy error page is noise; this message lands in a log file.
+ */
+export function errorCode(body: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return '';
+  }
+  if (!parsed || typeof parsed !== 'object') return '';
+  const error = (parsed as Record<string, unknown>)['error'];
+  const code =
+    typeof error === 'string'
+      ? error
+      : error && typeof error === 'object' && typeof (error as Record<string, unknown>)['code'] === 'string'
+        ? ((error as Record<string, unknown>)['code'] as string)
+        : '';
+  // Redacted before the cut, as everywhere else.
+  return redact(code).text.slice(0, 120);
 }
 
 /** Retry-After is either delta-seconds or an HTTP date. Unparseable means no request. */
