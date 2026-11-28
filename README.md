@@ -512,7 +512,7 @@ returns. Neither needs root. The unit restarts the collector only on a **crash**
 exit — after `logout` the collector exits cleanly and the supervisor leaves it stopped instead of
 respawning it every few seconds (launchd `KeepAlive`/`SuccessfulExit`, systemd `Restart=on-failure`
 with a 5-in-5-minutes start limit). `-f` / `--foreground` runs in the terminal instead — best for a
-first run, and the only mode where `status` reports `Running: yes`.
+first run. Both write the pidfile, so `status` reports `Running: yes` for either.
 
 `--agent <id>` (repeatable, or comma-separated: `--agent claude_code,codex`) runs only those agents
 for this foreground run, overriding `tracking.agents`. It is refused without `--foreground`, because
