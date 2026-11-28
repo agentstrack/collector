@@ -246,6 +246,28 @@ describe('session.ended', () => {
     expect(peek).not.toHaveBeenCalled();
   });
 
+  it('ends a session that went quiet before a restart, in the next process — once, and not if it resumes', async () => {
+    const ended = (spool: Spool) => sent(spool).filter((e) => e.event_type === 'session.ended');
+    for (const resumes of [false, true]) {
+      const spoolPath = join(tempDir(), 'spool.db');
+      const first = setup({ spoolPath });
+      // @ts-expect-error private
+      first.collector.trackSession(quiet());
+      first.collector.stop();
+
+      // The next process: already past the 120s idle timeout (the event is 600s old).
+      const second = setup({ spoolPath });
+      if (resumes) {
+        // @ts-expect-error private
+        second.collector.trackSession({ ...quiet(), occurred_at: new Date().toISOString() });
+      }
+      await second.collector.scanOnce();
+      await second.collector.scanOnce();
+      expect(ended(second.spool), `resumes=${resumes}`).toHaveLength(resumes ? 0 : 1);
+      second.collector.stop();
+    }
+  });
+
   it('waits while a backfill is still reading, then ends the idle session', async () => {
     const dir = tempDir();
     writeFileSync(join(dir, 'rollout.jsonl'), '{}\n');
@@ -341,6 +363,25 @@ describe('git.branch_changed', () => {
     expect(changes[0]!.session_id).toBe('s1');
   });
 
+  it('emits no transition stamped in the past when an older transcript is replayed', () => {
+    const dir = repo();
+    const { spool, collector } = setup({ config: { tracking: { git_metadata: true, agents: [] } } });
+    const at = (msAgo: number) => ({ ...prompt(dir), event: { ...prompt(dir).event, occurred_at: new Date(Date.now() - msAgo).toISOString() } });
+    // @ts-expect-error private
+    collector.enqueue([at(0)], COLLECTOR);
+    checkout(dir, 'feature/x');
+    // @ts-expect-error private
+    collector.repoCache.clear();
+    // A backfilled event from an hour ago: no change, and the branch it saw is not remembered.
+    // @ts-expect-error private
+    collector.enqueue([at(3_600_000)], COLLECTOR);
+    expect(sent(spool).filter((e) => e.event_type === 'git.branch_changed')).toHaveLength(0);
+    // @ts-expect-error private
+    collector.enqueue([at(0)], COLLECTOR);
+    const changes = sent(spool).filter((e) => e.event_type === 'git.branch_changed');
+    expect(changes.map((e) => e.payload)).toMatchObject([{ from: 'main', to: 'feature/x' }]);
+  });
+
   it('says nothing for an excluded project', () => {
     const dir = repo();
     const { spool, collector } = setup({
@@ -384,6 +425,22 @@ describe('upload', () => {
     for (let i = 0; i < 10; i++) await collector.flush();
     expect(spool.depth()).toBe(0);
     expect(collector.uploadState().paused).toBeNull();
+  });
+
+  it('drain() halves a 400 down to the bad event in one call, as one-shot sync needs', async () => {
+    const events = Array.from({ length: 18 }, heartbeat);
+    const bad = events[11]!.event_id;
+    const { spool, collector } = setup({
+      config: { upload: { batch_size: 100, max_retries: 3 } },
+      sendBatch: async (batch) => {
+        if (batch.some((e) => e.event_id === bad)) throw new ApiError('invalid event', 400, false);
+        return ok(batch.length);
+      },
+    });
+    spool.enqueue(events);
+    await collector.scanOnce();
+    await collector.drain();
+    expect(spool.peek(100).map((p) => p.eventId)).toEqual([bad]);
   });
 
   it('keeps the good siblings of a bad event', async () => {

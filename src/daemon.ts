@@ -27,7 +27,8 @@ import { clampPrivacyMode } from './privacy/mode.js';
 import { isExcluded } from './privacy/paths.js';
 import { describeRepo } from './git/repo.js';
 import { GitCommitWatcher } from './git/commits.js';
-import { PRIVACY_MODES, SCHEMA_VERSION, type EventEnvelope, type PrivacyMode, type RepoContext } from './schema.js';
+import { z } from 'zod';
+import { AGENTS, PRIVACY_MODES, SCHEMA_VERSION, type EventEnvelope, type PrivacyMode, type RepoContext } from './schema.js';
 
 export { VERSION };
 
@@ -204,6 +205,23 @@ export const UPLOAD_PAUSE_META = 'upload_paused_reason';
  */
 export const ORG_POLICY_META = 'org_policy';
 
+/**
+ * Spool meta key holding the open-session map (JSON), so a session that went
+ * quiet before a restart, an auto-update or a one-shot `sync` is still ended
+ * by whichever process runs next. Entries older than this are dropped.
+ */
+export const OPEN_SESSIONS_META = 'open_sessions';
+const OPEN_SESSION_MAX_AGE_MS = 7 * 86_400_000;
+
+const PersistedSessions = z.array(
+  z.object({
+    agent: z.enum(AGENTS),
+    agentVersion: z.string().optional(),
+    sessionId: z.string(),
+    lastAtMs: z.number().finite(),
+  }),
+);
+
 /** How often a known server config is re-fetched; how soon an unknown one is retried. */
 const CONFIG_TTL_MS = 10 * 60_000;
 const CONFIG_RETRY_MS = 60_000;
@@ -238,8 +256,11 @@ export class Collector {
    */
   private policyKnown = false;
   private warnedNoPolicy = false;
-  /** git root -> last branch seen, for git.branch_changed. Per process: the first read is never a change. */
-  private readonly lastBranch = new Map<string, string>();
+  /**
+   * git root -> last branch seen and the occurred_at of the event it was seen
+   * on, for git.branch_changed. Per process: the first read is never a change.
+   */
+  private readonly lastBranch = new Map<string, { branch: string; atMs: number }>();
   /** Event types enqueued during the current scan, for `--verbose`. */
   private readonly scanCounts = new Map<string, number>();
   /**
@@ -293,6 +314,7 @@ export class Collector {
     this.localMode = config.privacy.mode;
     const persisted = this.persistedPolicy();
     if (persisted) this.applyOrgPolicy(persisted);
+    this.restoreOpenSessions();
   }
 
   async start(): Promise<void> {
@@ -456,7 +478,9 @@ export class Collector {
     this.running = false;
     // No session.ended here: SIGTERM, an auto-update restart and the end of
     // `sync --full` are not the developer ending a session, and an end stamped
-    // now would cut every open session short. The idle timeout ends them.
+    // now would cut every open session short. The idle timeout ends them —
+    // in the next process, from the map persisted here.
+    this.persistOpenSessions();
     this.spool.close();
   }
 
@@ -498,6 +522,34 @@ export class Collector {
     } catch {
       return null;
     }
+  }
+
+  /** Reloads the persisted open-session map. Unreadable or invalid means empty. */
+  private restoreOpenSessions(): void {
+    const raw = this.spool.getMeta(OPEN_SESSIONS_META);
+    if (raw === null) return;
+    let parsed;
+    try {
+      parsed = PersistedSessions.safeParse(JSON.parse(raw));
+    } catch {
+      return;
+    }
+    if (!parsed.success) return;
+    const cutoff = Date.now() - OPEN_SESSION_MAX_AGE_MS;
+    for (const s of parsed.data) {
+      if (s.lastAtMs >= cutoff) this.openSessions.set(`${s.agent}::${s.sessionId}`, s);
+    }
+  }
+
+  private persistOpenSessions(): void {
+    const cutoff = Date.now() - OPEN_SESSION_MAX_AGE_MS;
+    const open = [...this.openSessions.values()].filter((s) => s.lastAtMs >= cutoff);
+    this.spool.setMeta(OPEN_SESSIONS_META, JSON.stringify(open));
+  }
+
+  /** Whether an org policy is in force; false means a registered device's scan was held. */
+  orgPolicyKnown(): boolean {
+    return this.policyKnown;
   }
 
   /** False, logged once, while a registered device has no org policy in force. */
@@ -665,6 +717,7 @@ export class Collector {
     if (!backfilling) {
       queued += this.endIdleSessions(this.config.tracking.idle_timeout_seconds * 1000, 'timeout');
     }
+    this.persistOpenSessions();
 
     if (!this.dryRun) {
       if (queued > 0) log(`Queued ${queued} events across ${files} files`);
@@ -819,8 +872,14 @@ export class Collector {
    * Nothing on the first sighting of a repo: a restart is not a checkout.
    */
   private branchChange(root: string, to: string, trigger: NormalizedEvent): NormalizedEvent | null {
-    const from = this.lastBranch.get(root);
-    this.lastBranch.set(root, to);
+    // Only an event at least as new as the last one moves the remembered
+    // branch: a backfilled transcript would otherwise emit transitions
+    // stamped in the past.
+    const atMs = Date.parse(trigger.event.occurred_at);
+    const last = this.lastBranch.get(root);
+    if (!Number.isFinite(atMs) || (last && atMs < last.atMs)) return null;
+    this.lastBranch.set(root, { branch: to, atMs });
+    const from = last?.branch;
     if (from === undefined || from === to) return null;
     const { occurred_at, session_id, agent, agent_version } = trigger.event;
     return {
@@ -1015,6 +1074,22 @@ export class Collector {
       }
     }
     return true;
+  }
+
+  /**
+   * `sync`: flush until the queue is empty, a pass changes nothing (no event
+   * left the queue and the batch size held), or a pause/backoff is due — so a
+   * 400 is halved down to the bad event within one invocation.
+   */
+  async drain(): Promise<void> {
+    for (;;) {
+      const depth = this.spool.depth();
+      const size = this.batchSize;
+      await this.flush();
+      const left = this.spool.depth();
+      if (left === 0 || this.pausedReason || Date.now() < this.nextUploadAt) return;
+      if (left === depth && this.batchSize === size) return;
+    }
   }
 
   /** Sends one batch and reports what happened. Touches no shared state. */
