@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs';
 import type { RateWindow } from './codex.js';
 
 /**
@@ -35,9 +35,8 @@ export function readOpenIslandRateLimits(
 ): OpenIslandReading | undefined {
   let fd: number | undefined;
   try {
-    const link = lstatSync(path);
-    if (!link.isFile()) return undefined; // a symlink or anything else
-    // O_NOFOLLOW closes the swap-after-lstat window on platforms that have it.
+    // O_NOFOLLOW refuses a symlink at open; every other check runs on the open
+    // descriptor, so there is no check-then-open window to race.
     fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size > MAX_BYTES) return undefined;
