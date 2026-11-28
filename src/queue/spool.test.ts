@@ -150,4 +150,18 @@ describe('Spool.fail — poison handling must not lose good events', () => {
     spool2.fail([a.event_id], 0);
     expect(spool2.depth()).toBe(1); // b was never attempted and survives
   });
+
+  it('snapshots queue and checkpoints into a copy that does not write back', () => {
+    const spool = newSpool();
+    spool.enqueue([event()]);
+    spool.setCheckpoint('/t/a.jsonl', '1', 10, 10);
+    const path = join(dirs[dirs.length - 1]!, 'copy.db');
+    spool.snapshotTo(path);
+    const copy = new Spool(path);
+    expect(copy.depth()).toBe(1);
+    expect(copy.getCheckpoint('/t/a.jsonl')).toMatchObject({ offset: 10 });
+    copy.enqueue([event()]);
+    expect(spool.depth()).toBe(1);
+    copy.close();
+  });
 });

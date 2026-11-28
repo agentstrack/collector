@@ -248,6 +248,11 @@ export class Spool {
     this.stmt.delMeta.run(key);
   }
 
+  /** A consistent copy of the whole spool at `path` (which must not exist), safe while the daemon writes. */
+  snapshotTo(path: string): void {
+    this.db.prepare('VACUUM INTO ?').run(path);
+  }
+
   /** Stable per-install id, generated once. */
   installId(): string {
     let id = this.getMeta('install_id');
