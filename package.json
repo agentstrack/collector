@@ -1,7 +1,7 @@
 {
   "name": "@agentstrack/collector",
   "version": "0.7.0",
-  "description": "Privacy-first telemetry collector for AI coding agents — Claude Code, Codex, and more. Local-first, open source.",
+  "description": "Privacy-first collector for AI coding agent analytics: Claude Code, Codex, Gemini CLI and OpenCode token and cost tracking. Local-first, open source.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
@@ -29,7 +29,12 @@
     "token-usage",
     "ai-cost-tracking",
     "openai",
-    "anthropic"
+    "anthropic",
+    "ai-coding-agent-analytics",
+    "claude-code-cost-tracking",
+    "codex-token-usage",
+    "gemini-cli",
+    "opencode"
   ],
   "repository": {
     "type": "git",

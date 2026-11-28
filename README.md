@@ -8,7 +8,8 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D24-brightgreen.svg)](https://nodejs.org)
 
 `@agentstrack/collector` turns the records Claude Code, Codex, OpenCode, Gemini CLI and Antigravity
-already keep on your machine into a normalized event stream:
+already keep on your machine into a normalized event stream for
+[AgentsTrack, AI coding agent analytics](https://agentstrack.ai):
 
 - **Tokens and cost** — input, cached input, cache creation, output and reasoning tokens, normalized across every agent. OpenCode's real settled provider cost comes through as `REPORTED`, not an estimate.
 - **Which account paid** — a stable, opaque account key per session, so a personal login and a work one never merge into one bill.
@@ -24,6 +25,10 @@ directory; nothing about your agent setup changes.
 that runs on your machine and reads your files. Prompts and code are dropped locally, before the
 upload queue, and `agentstrack sync --dry-run --print` shows you the literal JSON that would be sent,
 without uploading any of it: [Verify it yourself](#verify-it-yourself).
+
+The events feed [Claude Code and Codex cost tracking at agentstrack.ai](https://agentstrack.ai):
+tokens and cost with its basis, per account, per project and per agent. `--api-url` points the
+collector at a self-hosted instance instead.
 
 ---
 
