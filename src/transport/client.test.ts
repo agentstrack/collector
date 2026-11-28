@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApiClient, ApiError, BatchResult, backoffMs, errorCode, parseServerConfig, retryAfterMs } from './client.js';
+import { compileRules } from '../privacy/redact.js';
 
 describe('parseServerConfig', () => {
   it('drops only the malformed redaction rules, keeping the config and the valid ones', () => {
@@ -8,8 +9,18 @@ describe('parseServerConfig', () => {
       redaction_rules: [{ pattern: 'acme-\\d+', replacement: '[org]' }, { pattern: 1 }, null, 'x', { replacement: 'y' }],
     });
     expect(config?.privacy_mode).toBe('analytics');
-    expect(config?.redaction_rules).toEqual([{ pattern: 'acme-\\d+', replacement: '[org]' }]);
+    expect(config?.redaction_rules).toEqual([{ pattern: 'acme-\\d+', replacement: '[org]' }, null, null, null, null]);
     expect(parseServerConfig({ privacy_mode: 'analytics' })?.redaction_rules).toEqual([]);
+  });
+
+  it("numbers skipped rules by their index in the server's array, malformed ones included", () => {
+    const config = parseServerConfig({
+      privacy_mode: 'analytics',
+      redaction_rules: [{ pattern: 1 }, { pattern: '(a+)+', replacement: 'x' }, { pattern: 'ok', replacement: 'y' }],
+    });
+    const skipped: string[] = [];
+    expect(compileRules(config!.redaction_rules, (m) => skipped.push(m)).map((r) => r.name)).toEqual(['org_rule_2']);
+    expect(skipped).toEqual(['org redaction rule #0 skipped: malformed', expect.stringMatching(/^org redaction rule #1 skipped: /)]);
   });
 
   it('keeps unknown fields, defaults missing rules to [], leaves event_types undefined', () => {

@@ -209,11 +209,16 @@ function unsafeReason(pattern: string): string | null {
  * config, not user content, but there is no reason to echo it into a log.
  */
 export function compileRules(
-  rules: { pattern: string; replacement: string }[],
+  /** `null` is an element the config parser found malformed; it keeps its index. */
+  rules: readonly ({ pattern: string; replacement: string } | null)[],
   onSkip: (message: string) => void = () => {},
 ): RedactionRule[] {
   const compiled: RedactionRule[] = [];
   for (const [index, rule] of rules.entries()) {
+    if (!rule) {
+      onSkip(`org redaction rule #${index} skipped: malformed`);
+      continue;
+    }
     const unsafe = unsafeReason(rule.pattern);
     if (unsafe) {
       // Same policy as a malformed rule: skip rather than stop the collector.

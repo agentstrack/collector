@@ -47,15 +47,17 @@ const RedactionRuleShape = z.object({ pattern: z.string(), replacement: z.string
 /**
  * Org redaction rules, validated one by one: a single malformed element is
  * dropped on its own rather than failing the whole config, which would also
- * throw away the org's privacy ceiling and every valid rule beside it.
+ * throw away the org's privacy ceiling and every valid rule beside it. It is
+ * dropped as `null`, in place, so compileRules logs it and numbers every rule
+ * by its index in the array the admin configured.
  */
 const RedactionRules = z
   .array(z.unknown())
   .default([])
   .transform((rules) =>
-    rules.flatMap((rule) => {
+    rules.map((rule) => {
       const parsed = RedactionRuleShape.safeParse(rule);
-      return parsed.success ? [parsed.data] : [];
+      return parsed.success ? parsed.data : null;
     }),
   );
 
